@@ -12,7 +12,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import sampler, scoring, voice
+from . import layers, sampler, scoring, voice
 from .manifest import load_all
 
 REPO = Path(__file__).resolve().parent.parent
@@ -110,7 +110,10 @@ def stratum_sizes(rows) -> dict:
     return out
 
 
-def scope_for(row, mode: str) -> dict:
+def scope_for(row, mode: str, decoys: dict | None = None) -> dict:
+    """What the adapter is told. 'decoy' is sent as 'given' with another question's documents."""
+    if mode == "decoy":
+        return {"mode": "given", "namespace": row["ds"], "docs": (decoys or {}).get(row["id"], [])}
     return {"mode": mode, "namespace": row["ds"] if mode != "mixed" else "all",
             "docs": row.get("gold_docs", []) if mode == "given" else []}
 
@@ -161,9 +164,10 @@ def run(*, root="data", adapter=None, student="me", mode="test", n_rounds=1, see
     os.environ["ME4_INDEX_DIR"] = str(index_dir)
     os.environ.setdefault("ME4_DATA", str(root))
     j = scoring.Judge(judge, model=judge_model, cache_path=str(Path(runs_dir) / ".judge_cache.jsonl"))
-    ctx = {"stratum_sizes": stratum_sizes(rows)}
+    ctx = {"stratum_sizes": stratum_sizes(rows), "scope": scope}
+    decoys = layers.decoy_docs(rows) if scope == "decoy" else None
     clips = voice.ClipStore(audio_dir)
-    ad.attach(index_dir, scope)
+    ad.attach(index_dir, "given" if scope == "decoy" else scope)
     stats = MachineStats()
     stats.start()
     evf = open(out / "events.jsonl", "a", encoding="utf-8")
@@ -183,9 +187,10 @@ def run(*, root="data", adapter=None, student="me", mode="test", n_rounds=1, see
                 ad.reset()
             except Exception as e:  # noqa: BLE001
                 runlog.write(f"reset failed {key}: {e}\n")
-            res = voice.ask_one(ad, q, scope_for(q, scope), clips=clips)
+            res = voice.ask_one(ad, q, scope_for(q, scope, decoys), clips=clips)
             sc = scoring.score_question(q, res, j, ctx)
             rec = scoring.merge(q, res, sc)
+            rec["layers"] = layers.per_question(q, rec)    # before test mode drops the gold
             events = rec.pop("events", [])
             rec["key"], rec["round"], rec["pos"] = key, q["round"], q["pos"]
             if mode == "test":                      # no gold details in test mode output
@@ -214,6 +219,7 @@ def run(*, root="data", adapter=None, student="me", mode="test", n_rounds=1, see
         evf.close()
         runlog.close()
     agg = scoring.aggregate(scored_all, ctx)
+    agg["layers"] = layers.aggregate(scored_all, scope)
     agg["machine"] = machine
     agg["elapsed_s"] = round(time.time() - t_start, 1)
     agg["judge"] = j.config() if hasattr(j, "config") else judge

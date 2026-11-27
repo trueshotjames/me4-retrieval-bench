@@ -18,7 +18,7 @@ A harness that asks your ME4 voice agent questions from five public datasets, ti
 ## Contents
 - [Quick start](#quick-start)
 - [Setup and run guide](#setup-and-run-guide): download, connect your agent, build the index, record clips, check, run, read results
-- [How the benchmark works](#how-the-benchmark-works): split, rounds, question delivery, timing, scope, scoring, metrics, test-mode rules
+- [How the benchmark works](#how-the-benchmark-works): split, rounds, question delivery, timing, scope, scoring, metrics, debug layers, test-mode rules
 - [Datasets](#datasets) and [Sample questions](#sample-questions)
 - [Repository layout](#repository-layout), [Known limitations](#known-limitations), [Tests](#tests)
 
@@ -52,7 +52,7 @@ One run does everything, and it is resumable: after a network failure, run the s
 |---|---|
 | `--dry-run` | List downloads and sizes only. Add `--offline` to skip probing the network. |
 | `--force` | Download again even if present. |
-| `--no-mixed-formats` | Store every FRAMES article as `.md` (default: about 30% become .docx, .html, .txt or .odt). |
+| `--no-mixed-formats` | Store every FRAMES article as `.md` and every MiMoTable workbook as `.xlsx` (default: about 30% of FRAMES become .docx, .html, .txt or .odt, and about 30% of MiMoTable become .ods, .csv/.tsv or .xls). |
 | `--no-manifest` | Skip the manifest step at the end. |
 | `--only <ds> ...` | Debugging only. Fetches just those datasets and skips the manifest step. Normal use always fetches all five. |
 | `--root <dir>` | Where datasets go (default `./data`). |
@@ -65,6 +65,8 @@ One run does everything, and it is resumable: after a network failure, run the s
 | `HTTPS_PROXY` | Honoured for all downloads. |
 | `ME4_CONTACT` | Optional URL that identifies you (for example this repo's URL). Added to the Wikipedia User-Agent, since Wikimedia throttles anonymous clients harder. |
 | `ME4_FRAMES_MIXED_SHARE` | Share of FRAMES articles in non-Markdown formats, 0 to 1 (default 0.3). |
+| `ME4_MIMOTABLE_MIXED_SHARE` | Share of MiMoTable workbooks in non-.xlsx formats, 0 to 1 (default 0.3). |
+| `ME4_SOFFICE` | Path to LibreOffice `soffice`, if it is not on PATH or in the usual install folder. Only needed for the .xls share. |
 
 Nothing reads `.env` automatically. `.env.example` lists the variables; set them in your shell.
 
@@ -78,6 +80,8 @@ Nothing reads `.env` automatically. `.env.example` lists the variables; set them
 | MiMoTable | `jasonNLP/MiMoTable` on GitHub, English problems and spreadsheets |
 
 **How FRAMES articles are fetched:** 50 titles per request, one request at a time, about 52 requests for all 2,551 articles. Wikipedia returns wikitext, which is converted to Markdown locally. Templates are not expanded, so infoboxes become key/value lists, common templates (dates, unit conversions, lists) are rendered, and citations and other templates are dropped. Each article's revision id is saved in `data/frames/_revisions.json`. Which article gets which file type is fixed by its title, so every machine gets the same mix.
+
+**How MiMoTable file types are mixed:** after the download, 62 of the 206 workbooks (30%) are stored in another type, split about evenly: .ods (written in pure Python, any workbook), .csv or .tsv (only one-sheet files with a simple header, no merged cells, and no question that names a sheet), and .xls (only with LibreOffice installed, and only workbooks whose sheet names fit the 31-character .xls limit). Without LibreOffice the .xls share becomes .ods. Cell values, dates, merged cells and sheet names are kept; formulas, fonts and column widths are not. The choice is fixed by file name and content, the mapping is saved in `data/mimotable/english/_formats.json`, and each question's gold files follow it. Strata and the test split do not change. To change the mix, delete `data/mimotable` and fetch again.
 
 **The manifest step** loads each dataset's official question file, assigns the fixed train/test split, labels each question with its stratum, and writes `data/_manifest/<ds>.jsonl` (row format in `docs/SCHEMA.md`). It then compares every stratum's size and test count with `manifest/strata_expected.json`. If anything differs it prints each mismatch and records it in `data/_manifest/_status.json`, and **test runs are refused** until it matches. `python -m me4bench build-manifest` reruns this step alone.
 
@@ -110,7 +114,7 @@ Events `ask` yields, in order:
 | `{"t":"speech","text":...}` | Optional spoken chunk; only used by the filler-rule fallback. | no |
 | `{"t":"answer_start"}` | The real answer begins. | fallback |
 | `{"t":"first_audio"}` | First synthesised audio chunk of the real answer (synthesised, not played). | **yes** |
-| `{"t":"answer","text":...,"citations":[...],"files_opened":[...],"tokens":{"in","out"}}` | Final answer. Ends the question. | |
+| `{"t":"answer","text":...,"citations":[...],"files_opened":[...],"retrieved":[...],"tokens":{"in","out"}}` | Final answer. Ends the question. `retrieved` is optional: your retriever's ranked list, best first, used only by the [debug layers](#debug-layers-retrieval-generation-end-to-end). | |
 
 The runner timestamps events as it receives them, so adapters never measure time themselves. Citations are a list like `[{"file": "report.pdf", "page": 3}]` (`sheet`, `slide`, `line` also accepted), or written at the end of the answer as `[report.pdf, page 3]`.
 
@@ -165,7 +169,7 @@ Press Ctrl+C once to stop after the current question; `resume` continues from th
 | `--rounds N\|round\|hour\|full` | `round` | 40 questions per round. `hour` = what fits in 60 minutes at `--sec-per-q` (3 rounds at 25 s). `full` = 6 rounds, the most a test run can draw without repeating a question. |
 | `--dataset <ds>` | all | Ask only this dataset (8 slots per round). |
 | `--exclude-repoprobe` | off | Skip code questions; their 8 slots go 2 each to the other four datasets. |
-| `--scope scoped\|given\|mixed` | `scoped` | Which documents the agent may search (see below). |
+| `--scope scoped\|given\|mixed\|decoy` | `scoped` | Which documents the agent may search (see below). |
 | `--judge none\|heuristic\|anthropic\|openai_compat` | `heuristic` | Scoring judge. Use `anthropic` or `openai_compat` for real scores. |
 | `--judge-model` | `claude-sonnet-5-5` (anthropic) | Judge model; also `ME4B_JUDGE_MODEL`. |
 | `--seed N` | random | Same seed and data give the same questions in the same order. The seed is saved in `config.json`. |
@@ -200,6 +204,12 @@ python -m me4bench report runs/<student>/<stamp>      # rebuild results.html onl
 ```
 Remote judge verdicts are cached in `runs/.judge_cache.jsonl`, so re-scoring the same answers costs nothing.
 
+Tag each question by the layer that failed (see [Debug layers](#debug-layers-retrieval-generation-end-to-end)), using a normal run and a `--scope given` run of the same questions (same `--seed`, mode and rounds):
+```
+python -m me4bench layers runs/<student>/<scoped_stamp> --oracle runs/<student>/<given_stamp>
+```
+This writes `layers.json` and `layers.html` into the scoped run folder. Without `--oracle` it still writes layers 1 and 3.
+
 ## How the benchmark works
 
 ### The fixed split
@@ -230,6 +240,7 @@ The agent hears what a user would say and nothing more. Each question is sent as
 | `scoped` (default) | the question's dataset | empty | The agent searches that dataset's whole corpus. |
 | `given` | the question's dataset | the gold documents | Isolates reading from retrieval: the agent is told which files to use. |
 | `mixed` | `all` | empty | One index over all five corpora; hardest. |
+| `decoy` | the question's dataset | another question's gold documents (no file shared) | Refusal check: the answer is not in those files, so the only correct reply is "not found". |
 
 ### Scoring
 Every answer is scored 0 to 1. "Not found" is detected by a fixed list of phrases ("not in the files", "cannot be determined", "no information", "not answerable", and similar). For a question with no answer in the files, saying not found is the only correct reply; for an answerable question, saying not found is wrong.
@@ -253,6 +264,17 @@ Every answer is scored 0 to 1. "Not found" is detected by a fixed list of phrase
 - **Behaviour:** correct "not found" rate on unanswerable questions, confident-wrong rate (wrong and did not say not found), false "not found" rate (said not found when the answer exists), clarification rate.
 - **Accuracy by files needed**, median files opened, citation check counts, p50/p95 latency and timing sources, failures, max CPU temperature and RAM during the run.
 
+### Debug layers: retrieval, generation, end to end
+These metrics help you find *where* an answer went wrong. They are reported next to the official scores in `results.html` ("Debug layers") and in `results.json` under `summary.layers`, and they never change the official scores.
+
+| Layer | Question it answers | Metrics | How it is measured |
+|---|---|---|---|
+| 1. Retrieval | Did the agent find the gold evidence? | Recall@5, Recall@10, nDCG@10, MRR, pass rate | From `retrieved` in the answer event; if absent, `files_opened`, then `citations` (the source used is shown). Per page for MMLongBench-Doc, per file elsewhere. Pass = every gold item (up to 10) in the top 10. RepoProbe has no per-file gold, so no layer 1. |
+| 2. Generation | Is the answer right when the evidence is handed over? | Oracle accuracy; refusal rate | Oracle accuracy is the accuracy of a `--scope given` run. Refusal rate is the share of "not found" replies in a `--scope decoy` run. |
+| 3. End to end | Is the normal answer right and honest? | Accuracy, acceptable, missing and hallucination rates, truthfulness, evidence sufficiency | Each answer is correct, acceptable (score ≥ 0.5 but not correct), missing (not found to an answerable question, or no answer) or wrong. Truthfulness = mean of +1 / +0.5 / 0 / −1. Evidence sufficiency = share of gold items covered by the citations. |
+
+`python -m me4bench layers` joins a scoped run and a given run into one tag per question: **retrieval miss** (layer 1 failed), **generation miss** (layer 1 passed, layer 2 failed), **integration miss** (layers 1 and 2 passed, end to end failed) or **pass**. A question with no retrieval list that also fails with the documents handed over counts as a generation miss; anything else that cannot be decided is "unknown". Report `retrieved` from your adapter to get the sharpest layer 1.
+
 ### Test-mode rules
 - Test runs are refused if the manifest check failed (`ME4_ALLOW_UNVERIFIED=1` overrides, for practice only).
 - Every test run is numbered in `runs/test_runs.jsonl`.
@@ -267,7 +289,7 @@ Every answer is scored 0 to 1. "Not found" is detected by a fixed list of phrase
 | MultiHop-RAG | 2,556 | 96 | 609 news articles (6.8 MB, one JSON file) | .json | Judge accuracy; yes/no decided offline; null queries must say "not found" |
 | MMLongBench-Doc | 1,082 | 89 | 135 long PDFs (about 636 MB), many pages image-only | .pdf | Official rule scoring by answer format (Int, Float, Str, List, None) |
 | RepoProbe | 209 of 500 (15 repos, one per language) | 86 (6 whole repos) | 15 source repositories at pinned commits, media stripped | source code, configs, docs | Weighted checklist, judged item by item (0 to 1) |
-| MiMoTable (English) | 641 | 94 | 206 spreadsheets (1.7 MB) | .xlsx | LLM judge, correct or wrong; numbers accepted within 1% |
+| MiMoTable (English) | 641 | 94 | 206 spreadsheets (1.7 MB) | .xlsx, plus about 30% as .ods, .csv/.tsv, .xls | LLM judge, correct or wrong; numbers accepted within 1% |
 
 Test set: 459 questions in total (373 without RepoProbe). Everything else is training. A round has 40 slots, 8 per dataset, and each slot is a stratum below.
 
@@ -276,7 +298,7 @@ Test set: 459 questions in total (373 without RepoProbe). Everything else is tra
 - **MultiHop-RAG:** questions over a news corpus where the answer needs facts from 2 to 4 articles. Tests retrieval across similar articles (same story, different outlets and dates), comparison, time ordering, and refusing when the corpus has no answer. Strata: inference, comparison, temporal, null ("not in the files").
 - **MMLongBench-Doc:** questions about long PDFs (reports, papers, guidebooks, brochures). Tests PDF parsing, OCR or vision for pages with no text layer, reading tables, charts and figures, collecting evidence across many pages, and saying "not answerable" when the PDF has no answer. Strata: evidence only on image-only pages, several pages, table, chart, figure, layout text (footnotes, headers, lists), unanswerable (image-heavy / text document). Plain single-page text questions are training only.
 - **RepoProbe:** real GitHub Discussions questions about a code repository, with the maintainer's reply as reference. Tests code search over a whole repo: finding the right config key, source file, docs page or design reason, and explaining it the way a maintainer would. Strata: names a source file, config question, error or log text, mentions README or docs, project architecture, business logic, implementation details.
-- **MiMoTable:** questions about real-world spreadsheets with messy layouts. Tests reading .xlsx with merged and multi-row headers, several sheets, several tables on one sheet, and several files, then doing lookups, counts, sums, averages and comparisons correctly. Strata: one sheet (simple / complicated header), several sheets (simple / complicated), several tables on one sheet, several files (simple / complicated).
+- **MiMoTable:** questions about real-world spreadsheets with messy layouts. Tests reading spreadsheets (.xlsx, and .ods, .csv, .tsv or .xls for about 30% of files) with merged and multi-row headers, several sheets, several tables on one sheet, and several files, then doing lookups, counts, sums, averages and comparisons correctly. Strata: one sheet (simple / complicated header), several sheets (simple / complicated), several tables on one sheet, several files (simple / complicated).
 
 ## Sample questions
 All samples are real rows from the training split (none are test questions). "Processing" is what a good agent does; the harness only sees the spoken answer and its cited files.
@@ -381,9 +403,11 @@ All samples are real rows from the training split (none are test questions). "Pr
 | `me4bench/runner.py`, `me4bench/voice.py` | Run loop, question delivery, timing. |
 | `me4bench/speech.py` | Speech normalisation of questions and the fixed clarification reply. |
 | `me4bench/scoring/` | Per-dataset scorers, the judge and its prompts, aggregation. |
-| `me4bench/report.py` | Writes `results.html`. |
+| `me4bench/layers.py` | Debug layers: retrieval, generation and end-to-end metrics, and the per-question tags. |
+| `me4bench/report.py` | Writes `results.html` and `layers.html`. |
 | `me4bench/marks.py` | Timing marks to copy into your project. |
 | `me4bench/wikitext.py`, `me4bench/convert.py`, `me4bench/htmlmd.py` | Wikitext to Markdown, and Markdown to docx/html/txt/odt. |
+| `me4bench/sheetconv.py` | MiMoTable workbooks from .xlsx to .ods, .csv/.tsv, and .xls (via LibreOffice). |
 | `docs/SCHEMA.md`, `docs/PROJECT_HOOKS.md` | The data and adapter contracts, and the edits your project needs. |
 
 Created by the run, all git-ignored: `data/` (datasets, `_manifest/`, `_corpus/`), `index/`, `audio/`, `runs/`.

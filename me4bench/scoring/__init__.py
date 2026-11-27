@@ -45,6 +45,9 @@ def score_question(row: dict, result: dict, judge, ctx: Optional[dict] = None) -
     if result.get("failed") or result.get("error"):
         return common.result_dict(0.0, False, "failed", {"error": result.get("error")},
                                   None)
+    if (ctx or {}).get("scope") == "decoy":   # layer-2 refusal check: only "not found" is right
+        ok = common.says_not_found(result.get("answer") or "")
+        return common.result_dict(1.0 if ok else 0.0, ok, "refusal_check", {"decoy": True}, None)
     fn = SCORERS.get(row.get("ds"))
     if fn is None:
         raise ValueError("no scorer for dataset %r" % row.get("ds"))
