@@ -1,12 +1,263 @@
 # ME4 retrieval benchmark
 
-**Indexing never runs on the Raspberry Pi.** Embedding and OCR/vision run on a cloud VM, a GPU cluster over SSH, or a free Kaggle notebook (`tools/remote_index.sh`). The Pi only copies the finished `index/` and answers questions. `python -m me4bench index` refuses to run on ARM boards.
+A harness that asks your ME4 voice agent questions from five public datasets, times how fast the real answer starts, scores it, and writes an HTML report. The datasets are FRAMES, MultiHop-RAG, MMLongBench-Doc, RepoProbe and MiMoTable (English).
 
-Five public datasets: FRAMES, MultiHop-RAG, MMLongBench-Doc, RepoProbe, MiMoTable (English). Nothing is committed; they are downloaded from the official sources.
+- Standard library only, Python 3.9+. Runs on Windows, macOS, Linux and Raspberry Pi 4/5.
+- No dataset files are in this repo. One command downloads them from their official sources.
+- **Indexing never runs on the Raspberry Pi.** Embedding and OCR or vision run on a cloud VM, a GPU box over SSH, or a free Kaggle notebook. The Pi only loads the finished `index/` and answers questions.
+- Benchmark mode is voice-only: no microphone, no speaker, nothing recorded.
 
-FRAMES articles: about 30% are stored as .docx, .html, .txt or .odt (the rest as .md) so your file readers get exercised. Which article gets which type is fixed by its title. Size effect is small (FRAMES is roughly 65 MB). Turn it off with `python tools/fetch_data.py --no-mixed-formats`. Wikipedia text is fetched live, so it can differ slightly from the version FRAMES was written against.
+```
+ official sources ──fetch──▶ data/<ds>/  ──build-manifest──▶ data/_manifest/<ds>.jsonl (questions + split + strata)
+                                 │
+                                 └─ index (remote machine) ──▶ index/  ──copy──▶ Pi
+                                                                            │
+ runner: plan rounds ─▶ adapter.ask(question) ─▶ events + answer ─▶ score ─▶ runs/<student>/<stamp>/results.html
+```
 
-FRAMES articles come from the Wikipedia Action API as wikitext, 50 articles per request, one request at a time, and are converted to Markdown locally (about 52 requests for all 2,551 articles). Templates are not expanded by Wikipedia, so infoboxes become key/value lists, common templates (dates, unit conversions, lists) are rendered, and citations and other templates are dropped. The revision id of each article is saved in `data/frames/_revisions.json`. Optional: set `ME4_CONTACT` to a URL that identifies you, such as the repo URL, to add it to the User-Agent (Wikimedia throttles anonymous clients harder).
+## Contents
+- [Quick start](#quick-start)
+- [Setup and run guide](#setup-and-run-guide): download, connect your agent, build the index, record clips, check, run, read results
+- [How the benchmark works](#how-the-benchmark-works): split, rounds, question delivery, timing, scope, scoring, metrics, test-mode rules
+- [Datasets](#datasets) and [Sample questions](#sample-questions)
+- [Repository layout](#repository-layout), [Known limitations](#known-limitations), [Tests](#tests)
+
+## Quick start
+```
+git clone https://github.com/trueshotjames/me4-retrieval-bench && cd me4-retrieval-bench
+python tools/fetch_data.py                                            # 1. download all five datasets (~1.5 GB) and build the manifest
+python -m me4bench run --adapter adapters/fake_agent.py --mode train  # 2. try the harness with the scripted fake agent
+cp adapters/agent_entry_template.py adapters/agent_entry.py            # 3. connect your agent (fill in six functions)
+bash tools/remote_index.sh                                             # 4. on a GPU/cloud machine: build index/, then copy it to the Pi
+python -m me4bench menu                                                # 5. on the Pi: pick test or training, rounds, datasets, and go
+```
+On Windows use `copy` instead of `cp`, and run step 4 on a Linux machine or a Kaggle notebook. Use `python3` where `python` is Python 2.
+
+## Setup and run guide
+
+### 0. Requirements
+- Python 3.9 or newer. No packages are needed. Optional: `rich` (nicer console) and `pypdf` (one-time MMLB text-layer scan).
+- About 1.5 GB of free disk for `data/`, plus whatever your index needs.
+- Network access to huggingface.co, en.wikipedia.org, github.com, codeload.github.com, raw.githubusercontent.com and media.githubusercontent.com.
+- For the remote judge (recommended for real scores): an Anthropic API key, or any OpenAI-compatible endpoint.
+
+### 1. Download the datasets
+```
+python tools/fetch_data.py --dry-run     # list every download with its size; nothing is written
+python tools/fetch_data.py               # download all five, retry failed FRAMES articles, build and check the manifest
+```
+One run does everything, and it is resumable: after a network failure, run the same command again. Files already downloaded are skipped, and FRAMES articles that failed last time are retried. When it finishes it prints `All strata match the expected counts. Test set: 459 questions.` and `All done. Next: python -m me4bench menu`.
+
+| Flag | What it does |
+|---|---|
+| `--dry-run` | List downloads and sizes only. Add `--offline` to skip probing the network. |
+| `--force` | Download again even if present. |
+| `--no-mixed-formats` | Store every FRAMES article as `.md` (default: about 30% become .docx, .html, .txt or .odt). |
+| `--no-manifest` | Skip the manifest step at the end. |
+| `--only <ds> ...` | Debugging only. Fetches just those datasets and skips the manifest step. Normal use always fetches all five. |
+| `--root <dir>` | Where datasets go (default `./data`). |
+| `--write-pins` | Write the sha256 of fetched files to `manifest/pins.json`. |
+
+| Environment variable | Use |
+|---|---|
+| `GITHUB_TOKEN` | Avoids GitHub rate limits (RepoProbe and MiMoTable come from GitHub). |
+| `HF_TOKEN` | Hugging Face token, if you get rate-limited there. `HF_ENDPOINT` points at a mirror. |
+| `HTTPS_PROXY` | Honoured for all downloads. |
+| `ME4_CONTACT` | Optional URL that identifies you (for example this repo's URL). Added to the Wikipedia User-Agent, since Wikimedia throttles anonymous clients harder. |
+| `ME4_FRAMES_MIXED_SHARE` | Share of FRAMES articles in non-Markdown formats, 0 to 1 (default 0.3). |
+
+Nothing reads `.env` automatically. `.env.example` lists the variables; set them in your shell.
+
+**Where the data comes from**
+| Dataset | Source |
+|---|---|
+| FRAMES | `test.tsv` from Hugging Face `google/frames-benchmark`; each linked article from the Wikipedia Action API |
+| MultiHop-RAG | `yixuantt/MultiHop-RAG` on GitHub, pinned to commit `3dd4d4e` |
+| MMLongBench-Doc | `mayubo2333/MMLongBench-Doc` on GitHub (questions and 135 PDFs) |
+| RepoProbe | `Tencent-Hunyuan/RepoProbe` on GitHub for the questions; each of the 15 repos as a zip at its pinned commit, media stripped |
+| MiMoTable | `jasonNLP/MiMoTable` on GitHub, English problems and spreadsheets |
+
+**How FRAMES articles are fetched:** 50 titles per request, one request at a time, about 52 requests for all 2,551 articles. Wikipedia returns wikitext, which is converted to Markdown locally. Templates are not expanded, so infoboxes become key/value lists, common templates (dates, unit conversions, lists) are rendered, and citations and other templates are dropped. Each article's revision id is saved in `data/frames/_revisions.json`. Which article gets which file type is fixed by its title, so every machine gets the same mix.
+
+**The manifest step** loads each dataset's official question file, assigns the fixed train/test split, labels each question with its stratum, and writes `data/_manifest/<ds>.jsonl` (row format in `docs/SCHEMA.md`). It then compares every stratum's size and test count with `manifest/strata_expected.json`. If anything differs it prints each mismatch and records it in `data/_manifest/_status.json`, and **test runs are refused** until it matches. `python -m me4bench build-manifest` reruns this step alone.
+
+### 2. Connect your agent (the adapter)
+The harness talks to your project only through `adapters/agent_entry.py`. Your project code stays where it is.
+
+1. `cp adapters/agent_entry_template.py adapters/agent_entry.py` (this file is git-ignored).
+2. Point it at your project with `--project <folder>` or `ME4_PROJECT=<folder>`. The template adds that folder to `sys.path` so you can import your code.
+3. Fill in six functions:
+
+| Function | Called | Must do |
+|---|---|---|
+| `describe()` | once | Return `{"name", "version", "needs_gpu_for_ingest"}`. |
+| `ingest(folder, namespace)` | only by `index`, never on a Pi | Embed/OCR every file under `folder` into your index, tagged `namespace` (the dataset key). |
+| `attach(index_dir, scope)` | once per run | Open the prebuilt index read-only. The second argument is the run's `--scope` value. |
+| `reset()` | before every question | Clear conversation history and memory; keep the index loaded. |
+| `ask(utt, scope)` | once per question | A generator that yields events (below). |
+| `shutdown()` | once at the end | Clean up. |
+
+`utt` is `{"text": spoken question, "clip": WAV path or None, "id": question id}`. `scope` is `{"mode", "namespace", "docs"}` (see [Scope](#scope-which-documents-the-agent-may-search)).
+
+Events `ask` yields, in order:
+
+| Event | Meaning | Stops the clock? |
+|---|---|---|
+| `{"t":"question_end"}` | Optional, and only as the first event: the question clip finished playing. The clock restarts here, so clip length is not counted. | no |
+| `{"t":"plan","text":...}` | A plan or "let me look" filler. | no |
+| `{"t":"clarify","text":...}` | A clarifying question. The first one gets the fixed reply via `reply = yield {...}`; later ones get `None`. | no |
+| `{"t":"tool","name":...,"phase":"start"\|"end"}` | Optional tool trace. | no |
+| `{"t":"speech","text":...}` | Optional spoken chunk; only used by the filler-rule fallback. | no |
+| `{"t":"answer_start"}` | The real answer begins. | fallback |
+| `{"t":"first_audio"}` | First synthesised audio chunk of the real answer (synthesised, not played). | **yes** |
+| `{"t":"answer","text":...,"citations":[...],"files_opened":[...],"tokens":{"in","out"}}` | Final answer. Ends the question. | |
+
+The runner timestamps events as it receives them, so adapters never measure time themselves. Citations are a list like `[{"file": "report.pdf", "page": 3}]` (`sheet`, `slide`, `line` also accepted), or written at the end of the answer as `[report.pdf, page 3]`.
+
+The small edits your project itself needs (a `ME4_BENCH` switch that turns off mic and speaker, a `reset` hook, a namespace filter, and `mark("answer_start")`) are in [`docs/PROJECT_HOOKS.md`](docs/PROJECT_HOOKS.md), with Pipecat and plain-Python examples. `me4bench/marks.py` is the file to copy into your project.
+
+**Try the harness first** with the scripted fake agent, which needs no index:
+```
+python -m me4bench run --adapter adapters/fake_agent.py --mode train
+```
+`ME4_FAKE_MODE` sets its behaviour: `gold` (answers the gold answer, default), `wrong`, `notfound`, `clarify` (asks once, then answers). A `gold` run should score close to 100%.
+
+### 3. Build the index on a remote machine
+```
+bash tools/remote_index.sh              # all five datasets
+bash tools/remote_index.sh mmlb frames  # or some of them
+```
+Run this on a cloud VM, a GPU box over SSH, or a Kaggle notebook (clone the repo in a cell and run the same command). It fetches the data if needed, builds the manifest, calls your `ingest()` once per dataset, and checks the result with `tools/verify_index.py`. It refuses to run on a Raspberry Pi, and so does `python -m me4bench index`. ARM cloud VMs are fine. `ME4_ALLOW_INDEX=1` overrides the check.
+
+`ingest()` gets `data/_corpus/<ds>/`, a copy (hard links) of the documents only. Question files, answer keys and any file starting with `_` are left out, so the index cannot contain the answers.
+
+Your index should write `index/<ds>/MANIFEST.json` with `{"files": [{"path", "bytes"}], "built"}` so `verify_index.py` can check it. Then copy it to the Pi:
+```
+rsync -av index data/_manifest pi@<host>:~/me4-retrieval-bench/
+```
+The Pi also needs `data/` itself only if your agent opens original files at answer time (for example to read a page). Otherwise the index and `data/_manifest` are enough.
+
+### 4. Record the question clips (optional)
+```
+python tools/make_clips.py [--dataset frames] [--tts auto|espeak|piper|say|sapi] [--limit N]
+```
+Renders each question once with a local TTS (espeak-ng, piper, macOS `say` or Windows SAPI) into `audio/<ds>/<id>.wav`, plus the fixed clarification reply `audio/_fixed/clarify.wav`. The spoken text is the speech-normalised question (numbers, dates, URLs and file names written out the way a person says them). Without clips, `utt["clip"]` is `None` and your agent gets the spoken text.
+
+### 5. Check the setup
+```
+python -m me4bench check
+```
+Prints `ok` or `MISSING` for each dataset, whether the manifest and adapter exist, and whether this machine may index.
+
+### 6. Run
+```
+python -m me4bench menu                                   # interactive: test or training, dataset, exclude code, rounds with time estimates
+python -m me4bench run --rounds hour --exclude-repoprobe  # a test run of about an hour, no code questions
+python -m me4bench run --dataset mmlb --rounds 2 --mode train
+python -m me4bench run --rounds full --dry-run            # print question count, time estimate and repeats; asks nothing
+python -m me4bench resume runs/<student>/<stamp>          # continue a stopped run
+```
+Press Ctrl+C once to stop after the current question; `resume` continues from there with the same questions in the same order.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--mode test\|train` | `test` | Test runs use the fixed test set and are counted. Training runs use the rest and show gold answers. |
+| `--rounds N\|round\|hour\|full` | `round` | 40 questions per round. `hour` = what fits in 60 minutes at `--sec-per-q` (3 rounds at 25 s). `full` = 6 rounds, the most a test run can draw without repeating a question. |
+| `--dataset <ds>` | all | Ask only this dataset (8 slots per round). |
+| `--exclude-repoprobe` | off | Skip code questions; their 8 slots go 2 each to the other four datasets. |
+| `--scope scoped\|given\|mixed` | `scoped` | Which documents the agent may search (see below). |
+| `--judge none\|heuristic\|anthropic\|openai_compat` | `heuristic` | Scoring judge. Use `anthropic` or `openai_compat` for real scores. |
+| `--judge-model` | `claude-sonnet-5-5` (anthropic) | Judge model; also `ME4B_JUDGE_MODEL`. |
+| `--seed N` | random | Same seed and data give the same questions in the same order. The seed is saved in `config.json`. |
+| `--student <name>` | `$USER` | Names the run folder. |
+| `--sec-per-q` | 25 | Only used for time estimates and the `hour` preset. |
+| `--adapter <file>` | `adapters/agent_entry.py` | Also `ME4_ADAPTER`. |
+| `--project <folder>` | | Sets `ME4_PROJECT` for the adapter. |
+| `--root`, `--index`, `--audio`, `--runs` | `data`, `index`, `audio`, `runs` | Folders. |
+
+Judge setup: `--judge anthropic` needs `ANTHROPIC_API_KEY`. `--judge openai_compat` needs `ME4B_JUDGE_URL` (base URL or full `/chat/completions` URL), `ME4B_JUDGE_KEY` and `ME4B_JUDGE_MODEL`. `--judge none` scores nothing that needs a judge, so you can score later.
+
+### 7. Read the results
+Each run writes `runs/<student>/<YYYYmmdd-HHMMSS>/`:
+
+| File | Contents |
+|---|---|
+| `results.html` | The report: overall score, per-dataset table (weighted score, raw accuracy ± 95% margin, p50 and p95 latency, failures), a bar per stratum, accuracy by files needed, behaviour table, machine stats. |
+| `results.json` | Config, summary and every scored row. |
+| `results.csv` | One line per question: key, dataset, stratum, bucket, score, correct, latency, timing source, citation check, failure. |
+| `results.jsonl` | Rows as they are scored (used by `resume`). |
+| `events.jsonl` | Every event from your adapter with its time. |
+| `marks.jsonl` | Your project's `mark()` calls. |
+| `traces/<id>.txt` | Question, answer, score and latency per question. |
+| `config.json`, `run.log` | Run settings, question order, progress log. |
+
+`runs/test_runs.jsonl` counts every test run (number, date, code version, student, seed, rounds).
+
+Re-score a run later, for example after a `--judge none` run, without asking the agent again:
+```
+python -m me4bench score runs/<student>/<stamp> --judge anthropic
+python -m me4bench report runs/<student>/<stamp>      # rebuild results.html only
+```
+Remote judge verdicts are cached in `runs/.judge_cache.jsonl`, so re-scoring the same answers costs nothing.
+
+## How the benchmark works
+
+### The fixed split
+`manifest/split.json` lists, for each dataset, the 0-based row indexes of the test questions in the official question file. Everything else is training. The split was drawn once, stratified, and never changes, so every student is tested on the same 459 questions (373 without RepoProbe). `manifest/strata_expected.json` holds the expected size and test count of every stratum; the manifest step checks the downloaded data against it, so a changed upstream file cannot silently move the split.
+
+RepoProbe uses one repo per programming language (the one with the most questions), 15 repos and 209 of its 500 questions. Its test set is 6 whole repos (ProxmoxVE, adk-python, ducklake, opencloud, pkl, valkey, 86 questions), so the agent is tested on code it never practised on.
+
+### Rounds and sampling
+A round is 40 questions: 8 per dataset, and each of those 8 slots is a stratum (`me4bench/slots.py`). For each stratum the sampler shuffles its pool with the run's seed and draws without repeats until the pool runs out; only then does it reshuffle and mark the repeats (shown in the menu and saved in `config.json`). The test set gives 6 rounds (240 questions) with no repeats.
+
+Inside a stratum, the sampler prefers questions whose "files needed" bucket (0, 1, 2, 3–4, 5+, n/a for code) is furthest behind its target mix per 40 questions: 3.0, 12.3, 7.5, 7.8, 1.4 and 8.0. This keeps each round's difficulty close to the same mix.
+
+With `--exclude-repoprobe`, RepoProbe's 8 slots go 2 each to the other datasets, spread over their strata by largest remainder, and no stratum gets more than half its pool. The "n/a" bucket is dropped and the others are scaled back to 40.
+
+### Question delivery: voice only
+The agent hears what a user would say and nothing more. Each question is sent as the speech-normalised text (and the WAV clip, if recorded). The agent never sees gold answers or the question file, and it sees the gold documents only with `--scope given`. If the agent asks a clarifying question, it gets one fixed reply, "No extra details. Answer from the files, or say not found.", and any further clarifying question gets no reply.
+
+### Timing
+- The clock starts when `ask()` is called, or at `question_end` if the adapter plays the clip.
+- It stops at the first `first_audio` event at or after `answer_start`. Audio for a plan or a clarifying question does not stop it.
+- If there is no `first_audio`, it falls back to `answer_start`; then to the first substantive `speech` chunk (a rule that skips fillers like "let me look"; such results are flagged "filler rule, unvalidated"); then to the final `answer` event. Each row records which source was used.
+- A question fails after 120 s in total, or 60 s with no event after the clarification reply. A crash in your adapter also fails just that question; the run goes on.
+- Reported latency is p50 and p95 (nearest rank) over the questions that did not fail.
+
+### Scope: which documents the agent may search
+| `--scope` | `scope["namespace"]` | `scope["docs"]` | Use |
+|---|---|---|---|
+| `scoped` (default) | the question's dataset | empty | The agent searches that dataset's whole corpus. |
+| `given` | the question's dataset | the gold documents | Isolates reading from retrieval: the agent is told which files to use. |
+| `mixed` | `all` | empty | One index over all five corpora; hardest. |
+
+### Scoring
+Every answer is scored 0 to 1. "Not found" is detected by a fixed list of phrases ("not in the files", "cannot be determined", "no information", "not answerable", and similar). For a question with no answer in the files, saying not found is the only correct reply; for an answerable question, saying not found is wrong.
+
+| Dataset | How an answer is scored |
+|---|---|
+| FRAMES | Exact match after normalising, else the LLM judge decides correct or wrong (fixed prompt: same essential fact, no hedging between answers). |
+| MultiHop-RAG | Yes/no questions decided offline from the leading yes or no. Others by the judge, which requires the same conclusion. The official "any shared word" score is reported separately as *lenient accuracy*, because it is very lenient on long spoken answers. |
+| MMLongBench-Doc | The official rules by answer format. Int: equal. Float: within 1%, also accepting ×100 or ÷100. Str: exact for dates, URLs, file names and similar, else ANLS ≥ 0.5. List: same items. None: must say not found. With a remote judge the short answer is extracted first, as in the official pipeline; without one, a documented heuristic is used. |
+| RepoProbe | The reference answer's weighted checklist. The judge checks each item separately; the score is the weighted share covered (also shown out of 10). Correct means at least half; *perfect solve rate* counts answers that cover every item. |
+| MiMoTable | A single number within 1% of a numeric gold answer is correct without the judge. Otherwise the judge decides (numbers must agree to the gold's precision; lists must match exactly). |
+
+**Judges.** `heuristic` (the default) is offline: correct if token F1 ≥ 0.6 or the gold answer appears in the reply, and a checklist item counts if 60% of its content words appear. It is good for smoke tests, not for reported scores. `anthropic` and `openai_compat` send the fixed prompts in `me4bench/scoring/judge.py` and require a strict JSON verdict. `none` leaves those rows unscored (`needs_judge`); they are left out of accuracy and counted separately until you re-score.
+
+**Citations** are checked but never cost points. `cited_ok` is true if any cited file matches a gold document (for MMLB, if any cited page is an evidence page), false if none do, and "not reported" if the agent gave no citations.
+
+### Metrics in the report
+- **Dataset score:** the mean score per stratum, weighted by each stratum's size in the full question file, so the score estimates accuracy on the whole dataset rather than on the slot mix.
+- **Overall score:** the mean of the dataset scores.
+- **Raw accuracy:** the plain mean, with a worst-case 95% margin (1.96·√(0.25/n)).
+- **Behaviour:** correct "not found" rate on unanswerable questions, confident-wrong rate (wrong and did not say not found), false "not found" rate (said not found when the answer exists), clarification rate.
+- **Accuracy by files needed**, median files opened, citation check counts, p50/p95 latency and timing sources, failures, max CPU temperature and RAM during the run.
+
+### Test-mode rules
+- Test runs are refused if the manifest check failed (`ME4_ALLOW_UNVERIFIED=1` overrides, for practice only).
+- Every test run is numbered in `runs/test_runs.jsonl`.
+- Test results leave out gold answers, gold documents and judge details, so the test set does not leak through the run folder.
+- Training runs show everything, for debugging.
 
 ## Datasets
 
@@ -115,28 +366,37 @@ All samples are real rows from the training split (none are test questions). "Pr
 - **Processing:** look through the three files, find the one with an inventory count table, find the "actual quantity" column, and take the row with the largest value.
 - **Expected answer:** "Fleece Jeans, with 500."
 
-## 1. Download (Windows, macOS, Linux, Raspberry Pi 4/5)
-Python 3.9+ only, no packages, no git.
-```
-python tools/fetch_data.py --dry-run     # what will be downloaded, with sizes (about 1.5 GB)
-python tools/fetch_data.py               # downloads everything, then builds and checks the question manifest
-```
-One run does it all; it is resumable, so after a network failure just run it again (failed FRAMES articles are retried too). `python -m me4bench build-manifest` alone rebuilds the manifest without fetching.
-Always downloads all five. If GitHub rate-limits you, set `GITHUB_TOKEN`; for Hugging Face set `HF_TOKEN`. Behind a proxy, `HTTPS_PROXY` is honoured.
-The manifest step checks every stratum against `manifest/strata_expected.json` and prints any that differ.
+## Repository layout
+| Path | What it is |
+|---|---|
+| `tools/fetch_data.py` | The one download command (wraps `me4bench/fetch.py`). |
+| `tools/remote_index.sh`, `tools/verify_index.py` | Build and check the index on a remote machine. |
+| `tools/make_clips.py` | Render question clips with a local TTS. |
+| `adapters/agent_entry_template.py` | Copy to `adapters/agent_entry.py` and fill in. |
+| `adapters/fake_agent.py` | Scripted agent for trying the harness. |
+| `manifest/split.json`, `manifest/strata_expected.json` | The fixed test split and the expected stratum counts. |
+| `me4bench/datasets/*.py` | One module per dataset: download, load questions, assign strata and files-needed buckets. |
+| `me4bench/manifest.py` | Builds and checks `data/_manifest/`. |
+| `me4bench/slots.py`, `me4bench/sampler.py` | The 40 slots per round and the seeded round planner. |
+| `me4bench/runner.py`, `me4bench/voice.py` | Run loop, question delivery, timing. |
+| `me4bench/speech.py` | Speech normalisation of questions and the fixed clarification reply. |
+| `me4bench/scoring/` | Per-dataset scorers, the judge and its prompts, aggregation. |
+| `me4bench/report.py` | Writes `results.html`. |
+| `me4bench/marks.py` | Timing marks to copy into your project. |
+| `me4bench/wikitext.py`, `me4bench/convert.py`, `me4bench/htmlmd.py` | Wikitext to Markdown, and Markdown to docx/html/txt/odt. |
+| `docs/SCHEMA.md`, `docs/PROJECT_HOOKS.md` | The data and adapter contracts, and the edits your project needs. |
 
-## 2. Connect your project
-Copy `adapters/agent_entry_template.py` to `adapters/agent_entry.py` and fill it in (`--project <folder>` or `ME4_PROJECT`). Project-side edits are minimal: see `docs/PROJECT_HOOKS.md`. Try the harness first with `--adapter adapters/fake_agent.py`.
+Created by the run, all git-ignored: `data/` (datasets, `_manifest/`, `_corpus/`), `index/`, `audio/`, `runs/`.
 
-## 3. Run
-```
-python -m me4bench menu                          # test or training, rounds with duration estimates, one dataset, exclude code
-python -m me4bench run --rounds hour --exclude-repoprobe
-python -m me4bench run --dataset mmlb --rounds 2 --mode train
-python -m me4bench resume runs/<student>/<stamp>
-```
-Voice-only: pre-recorded clips (`tools/make_clips.py`), one fixed clarification reply, the clock stops at the first synthesised audio chunk of the real answer. No speaker, microphone or audio recording in benchmark mode.
-Test set: 459 questions (373 without RepoProbe). Test runs are counted in `runs/test_runs.jsonl`. Results: `runs/<student>/<stamp>/results.html`.
-Judge: `--judge none|heuristic|anthropic|openai_compat` (`ANTHROPIC_API_KEY` for the default).
+## Known limitations
+- **FRAMES articles are fetched live** from Wikipedia, so their text can differ a little from the version the questions were written against. A few linked articles no longer exist (4 of 2,551 on a recent run); the fetch reports them and retries them on the next run.
+- **The default judge is the offline heuristic.** It is fine for smoke tests but over- and under-counts on long spoken answers. Report scores from `--judge anthropic` or `openai_compat`.
+- **The filler-rule timing** is a fallback for projects that send no marks. It is a guess and is flagged in the results.
+- **Sample "processing" steps** below describe what a good agent does; they were written by hand and not checked against an agent run.
+- **Test-set size limits precision:** about ±10 points (95%) per dataset on 94 questions, about ±4.6 points over all 459.
 
-Docs: `docs/SCHEMA.md` (contracts), `docs/PROJECT_HOOKS.md`. Tests: `python -m unittest discover -s tests`.
+## Tests
+```
+python -m unittest discover -s tests
+```
+Unit tests for fetching, conversion, sampling, speech, timing and scoring, plus an end-to-end smoke run with the fake agent. They use small fixtures and need no network or downloaded data.
