@@ -1,0 +1,9 @@
+data/
+index/
+runs/
+audio/
+.env
+adapters/agent_entry.py
+__pycache__/
+*.pyc
+*.part
