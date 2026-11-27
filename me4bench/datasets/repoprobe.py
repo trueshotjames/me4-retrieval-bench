@@ -27,6 +27,9 @@ KW = [("Names a source file", r"[\w\-/]+\.(py|ts|js|go|rs|cpp|cs|java|rb|lua|swi
       ("Error or log text in the question", r"\b(error|traceback|exception|log)\b"),
       ("Mentions README or docs", r"\b(readme|docs?|documentation)\b")]
 WORKERS = 4   # parallel repo zip downloads
+# The fixed split was drawn on these 15 repos (C++ and C have ties at the top; this decides them).
+SPLIT_REPOS = {"ProxmoxVE", "TUnit", "adk-python", "blink.cmp", "dawarich", "desktop", "ducklake", "neuron-ai",
+               "opencloud", "pangolin", "pkl", "shell", "sqlite-data", "valkey", "walker"}
 TAX = {"Project Architecture": "Project architecture", "Business Logic": "Business logic"}
 
 
@@ -88,7 +91,10 @@ def _rows_and_repos(root: Path):
     for r in rows:
         name = str(pick(r, ["repo_name", "repo", "repository"]))
         by[info.get(name, {}).get("language") or str(pick(r, ["language", "lang"], "?"))][name] += 1
-    chosen = {c.most_common(1)[0][0] for c in by.values()}
+    chosen = set()
+    for c in by.values():   # most questions per language; ties go to the repo the split was drawn on
+        top = max(c.values())
+        chosen.add(min((n for n, k in c.items() if k == top), key=lambda n: (n not in SPLIT_REPOS, list(c).index(n))))
     return rows, info, chosen
 
 
