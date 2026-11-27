@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -49,6 +50,89 @@ def human(n: float) -> str:
             return f"{n:.0f} {u}" if u == "B" else f"{n:.1f} {u}"
         n /= 1024
     return str(n)
+
+
+class Progress:
+    """One live status line (tqdm-like), redrawn every second on a terminal; a plain log line every
+    5 s otherwise. Thread-safe: downloads in worker threads call add()/item_done()."""
+
+    def __init__(self, label: str, total_items: int = 0, log=print, interval: float = 1.0):
+        self.label, self.total_items, self.log, self.interval = label, total_items, log, interval
+        self.done = self.failed = 0
+        self.bytes = 0
+        self.total_bytes = 0          # only used for ETA when there is a single item
+        self.current = ""
+        self.note = ""                # free text shown at the end (e.g. retries)
+        self.t0 = time.time()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._tty = sys.stderr.isatty()
+        self._last_log = 0.0
+        self._th = threading.Thread(target=self._run, daemon=True)
+        self._th.start()
+
+    def add(self, n: int) -> None:
+        with self._lock:
+            self.bytes += n
+
+    def expect(self, n: int) -> None:
+        with self._lock:
+            self.total_bytes += n
+
+    def start_item(self, name: str) -> None:
+        self.current = name
+
+    def item_done(self, ok: bool = True) -> None:
+        with self._lock:
+            self.done += 1
+            self.failed += 0 if ok else 1
+
+    def line(self) -> str:
+        el = max(1e-9, time.time() - self.t0)
+        speed = self.bytes / el
+        if self.total_items > 1:
+            frac = self.done / self.total_items
+            count = f"{self.done}/{self.total_items}"
+            eta = (self.total_items - self.done) / (self.done / el) if self.done else None
+        else:
+            frac = self.bytes / self.total_bytes if self.total_bytes else 0
+            count = f"{human(self.bytes)}/{human(self.total_bytes)}" if self.total_bytes else human(self.bytes)
+            eta = (self.total_bytes - self.bytes) / speed if self.total_bytes and speed else None
+        frac = min(1.0, frac)
+        n = int(20 * frac)
+        eta_s = f"~{int(eta // 60)}m{int(eta % 60):02d}s left" if eta is not None else "ETA ?"
+        extra = (f" | {self.failed} failed" if self.failed else "") + (f" | {self.note}" if self.note else "")
+        size = f" | {human(self.bytes)}" if self.total_items > 1 else ""
+        return (f"    {self.label} [{'#' * n}{'-' * (20 - n)}] {count} ({frac * 100:.0f}%){size} | "
+                f"{human(speed)}/s | {int(el // 60)}m{int(el % 60):02d}s elapsed, {eta_s}{extra}"
+                f" | {self.current[:30]}")
+
+    def _draw(self, final=False):
+        if self._tty:
+            # never wider than the console: a wrapped line cannot be redrawn with \r (Windows showed
+            # one new line per second)
+            w = max(40, shutil.get_terminal_size((100, 20)).columns - 1)
+            sys.stderr.write("\r" + self.line()[:w].ljust(w) + ("\n" if final else ""))
+            sys.stderr.flush()
+        elif final or time.time() - self._last_log >= 5:
+            self.log(self.line())
+            self._last_log = time.time()
+
+    def _run(self):
+        while not self._stop.wait(self.interval):
+            self._draw()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._th.join(timeout=2)
+        self.current = ""
+        self._draw(final=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
 
 
 def sha256_file(path: Path) -> str:
@@ -90,7 +174,8 @@ def probe(url: str, timeout: int = 20) -> dict:
 
 
 def download(url: str, dest: Path, *, expect_sha: str | None = None, retries: int = 6,
-             timeout: int = 60, quiet: bool = False, validate=None) -> str:
+             timeout: int = 60, quiet: bool = False, validate=None,
+             progress: "Progress | None" = None) -> str:
     """Download url -> dest, resumable. Returns sha256. Skips if dest exists and matches expect_sha
     (or, with no expect_sha, if it exists and passes `validate`)."""
     dest = Path(dest)
@@ -105,7 +190,10 @@ def download(url: str, dest: Path, *, expect_sha: str | None = None, retries: in
         else:
             dest.unlink()
     part = dest.with_name(dest.name + ".part")
+    if progress is not None:
+        quiet = True   # the shared line replaces the per-file one
     last: Exception | None = None
+    expected = False
     for attempt in range(retries):
         have = part.stat().st_size if part.exists() else 0
         hdrs = {"Range": f"bytes={have}-"} if have else {}
@@ -125,7 +213,9 @@ def download(url: str, dest: Path, *, expect_sha: str | None = None, retries: in
                     cl = r.headers.get("Content-Length")
                     total = int(cl) if cl and cl.isdigit() else None
                 done = have
-                t0 = time.time()
+                if progress is not None and total and not expected:
+                    progress.expect(total - have)
+                    expected = True
                 with open(part, mode) as f:
                     while True:
                         b = r.read(CHUNK)
@@ -133,6 +223,8 @@ def download(url: str, dest: Path, *, expect_sha: str | None = None, retries: in
                             break
                         f.write(b)
                         done += len(b)
+                        if progress is not None:
+                            progress.add(len(b))
                         if not quiet and sys.stderr.isatty() and total:
                             sys.stderr.write(f"\r  {dest.name[:40]:40} {human(done)}/{human(total)}")
                             sys.stderr.flush()

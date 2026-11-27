@@ -51,6 +51,58 @@ class T(unittest.TestCase):
         self.assertEqual(n, 1)
         self.assertFalse((d / "evil.txt").exists())
 
+    def test_progress_counts_bytes_single_and_parallel(self):
+        d = Path(tempfile.mkdtemp())
+        logs = []
+        with fl.Progress("one", log=logs.append, interval=0.05) as pg:
+            fl.download(self.url, d / "a", progress=pg)
+        self.assertEqual(pg.bytes, len(DATA))
+        self.assertEqual(pg.total_bytes, len(DATA))
+        self.assertIn("100%", pg.line())
+        from concurrent.futures import ThreadPoolExecutor
+        (d / "b.part").write_bytes(DATA[:1_000_000])   # resumed: only the rest is counted
+        with fl.Progress("many", total_items=3, log=logs.append, interval=0.05) as pg:
+            def one(n):
+                fl.download(self.url, d / n, progress=pg)
+                pg.item_done()
+            with ThreadPoolExecutor(3) as ex:
+                list(ex.map(one, ["b", "c", "e"]))
+        self.assertEqual(pg.done, 3)
+        self.assertEqual(pg.bytes, 3 * len(DATA) - 1_000_000)
+        self.assertIn("3/3 (100%)", pg.line())
+        self.assertTrue(logs)   # final line is logged when not a terminal
+
+    def test_mmlb_parallel_fetch_with_fallback(self):
+        from me4bench.datasets import base, mmlb
+        import json as _j
+        root = Path(tempfile.mkdtemp())
+        names = [f"d{i}.pdf" for i in range(9)]
+        seen = []
+
+        def fake_download(url, dest, expect_sha=None, validate=None, progress=None, **k):
+            seen.append(url)
+            if url.endswith("samples.json"):
+                body = _j.dumps([{"doc_id": n} for n in names]).encode()
+            elif "media." in url and url.endswith("d3.pdf"):
+                raise fl.FetchError("media 404")
+            else:
+                body = b"%PDF-1.4 x"
+            if progress:
+                progress.add(len(body))
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(body)
+            return hashlib.sha256(body).hexdigest()
+
+        orig = fl.download
+        fl.download = fake_download
+        try:
+            mmlb.fetch(base.Ctx(root=root, log=lambda *a: None))
+        finally:
+            fl.download = orig
+        self.assertTrue((root / "mmlb" / "_done").exists())
+        self.assertEqual(sorted(p.name for p in (root / "mmlb" / "documents").iterdir()), names)
+        self.assertTrue(any("raw." in u and u.endswith("d3.pdf") for u in seen))
+
 
 if __name__ == "__main__":
     unittest.main()

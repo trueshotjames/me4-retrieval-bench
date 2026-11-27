@@ -11,6 +11,7 @@ import io
 import json
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .. import fetchlib as fl
@@ -25,6 +26,10 @@ KW = [("Names a source file", r"[\w\-/]+\.(py|ts|js|go|rs|cpp|cs|java|rb|lua|swi
       ("Config question (yaml, json, toml)", r"\b(yaml|yml|json|toml|config|\.env|dockerfile)\b"),
       ("Error or log text in the question", r"\b(error|traceback|exception|log)\b"),
       ("Mentions README or docs", r"\b(readme|docs?|documentation)\b")]
+WORKERS = 4   # parallel repo zip downloads
+# The fixed split was drawn on these 15 repos (C++ and C have ties at the top; this decides them).
+SPLIT_REPOS = {"ProxmoxVE", "TUnit", "adk-python", "blink.cmp", "dawarich", "desktop", "ducklake", "neuron-ai",
+               "opencloud", "pangolin", "pkl", "shell", "sqlite-data", "valkey", "walker"}
 TAX = {"Project Architecture": "Project architecture", "Business Logic": "Business logic"}
 
 
@@ -49,7 +54,9 @@ def _read_csvs(src: Path) -> list:
 
 
 def _repo_info(src: Path) -> dict:
-    """repo_name -> {language, commit, url}; tolerant of list/dict shapes."""
+    """repo_name -> {language, commit, url}; tolerant of list/dict shapes. Upstream (2026) is a list of
+    {"name": "owner/repo", "url", "primary_language", "snapshot": {"git": {"head": sha}}}, while the
+    CSVs use the short name, so each repo is keyed by both."""
     out = {}
     for p in sorted(src.rglob("repos_info*.json")):
         v = fl.load_json(p, None)
@@ -57,11 +64,19 @@ def _repo_info(src: Path) -> dict:
         for k, x in items:
             if not isinstance(x, dict):
                 continue
-            name = pick(x, ["repo_name", "name", "repo"], k if isinstance(k, str) else "")
-            if name:
-                out[str(name)] = {"language": str(pick(x, ["language", "lang", "main_language"], "")),
-                                  "commit": str(pick(x, ["commit", "commit_id", "commit_hash", "sha", "base_commit"], "")),
-                                  "url": str(pick(x, ["url", "repo_url", "github_url", "html_url"], ""))}
+            name = pick(x, ["repo_name", "name", "repo", "full_name"], k if isinstance(k, str) else "")
+            if not name:
+                continue
+            git = ((x.get("snapshot") or {}).get("git") or {}) if isinstance(x.get("snapshot"), dict) else {}
+            url = str(pick(x, ["url", "repo_url", "github_url", "html_url"], "") or git.get("origin", ""))
+            if not url and "/" in str(name):
+                url = "https://github.com/" + str(name)
+            rec = {"language": str(pick(x, ["language", "lang", "main_language", "primary_language"], "")),
+                   "commit": str(pick(x, ["commit", "commit_id", "commit_hash", "sha", "base_commit"], "")
+                                 or git.get("head", "")),
+                   "url": url}
+            out[str(name)] = rec
+            out.setdefault(str(name).rsplit("/", 1)[-1], rec)
     return out
 
 
@@ -76,7 +91,10 @@ def _rows_and_repos(root: Path):
     for r in rows:
         name = str(pick(r, ["repo_name", "repo", "repository"]))
         by[info.get(name, {}).get("language") or str(pick(r, ["language", "lang"], "?"))][name] += 1
-    chosen = {c.most_common(1)[0][0] for c in by.values()}
+    chosen = set()
+    for c in by.values():   # most questions per language; ties go to the repo the split was drawn on
+        top = max(c.values())
+        chosen.add(min((n for n, k in c.items() if k == top), key=lambda n: (n not in SPLIT_REPOS, list(c).index(n))))
     return rows, info, chosen
 
 
@@ -99,7 +117,14 @@ def load(root: Path) -> list:
 
 
 def ready(root: Path) -> bool:
-    return (Path(root) / KEY / "_done").exists()
+    """_done plus every chosen repo extracted (an older run could finish with repos missing)."""
+    if not (Path(root) / KEY / "_done").exists():
+        return False
+    try:
+        _, _, chosen = _rows_and_repos(root)
+    except Exception:  # noqa: BLE001
+        return False
+    return len(chosen) > 1 and all((Path(root) / KEY / "repos" / safe_name(n) / "_ok").exists() for n in chosen)
 
 
 def _strip_media(d: Path) -> int:
@@ -116,7 +141,11 @@ def _strip_media(d: Path) -> int:
 
 def fetch(ctx: Ctx) -> None:
     d = ctx.dir(KEY)
-    z = ctx.get(KEY, ZIP, d / "_src.zip", validate=fl.is_good_zip)
+    if ctx.dry_run:
+        z = ctx.get(KEY, ZIP, d / "_src.zip", validate=fl.is_good_zip)
+    else:
+        with fl.Progress("question files", log=ctx.log) as pg:
+            z = ctx.get(KEY, ZIP, d / "_src.zip", validate=fl.is_good_zip, progress=pg)
     if ctx.dry_run:
         ctx.note(KEY, "15 repo commit zips (one per language; sizes known after the question files)",
                  "https://codeload.github.com/<owner>/<repo>/zip/<commit>", 370 * 2 ** 20)
@@ -130,6 +159,7 @@ def fetch(ctx: Ctx) -> None:
         raise fl.FetchError("RepoProbe: found no question CSV in the upstream repo; layout changed. "
                             "Open an issue with the folder listing of Tencent-Hunyuan/RepoProbe.")
     repos = d / "repos"
+    todo = []
     for name in sorted(chosen):
         dest = repos / safe_name(name)
         if (dest / "_ok").exists() and not ctx.force:
@@ -140,15 +170,39 @@ def fetch(ctx: Ctx) -> None:
         if "/" not in slug:
             ctx.log(f"  ! {name}: no GitHub URL in repos_info.json, skipped (its questions will be unanswerable)")
             continue
-        ref = i.get("commit") or "HEAD"
-        zp = ctx.get(KEY, f"https://codeload.github.com/{slug}/zip/{ref}", d / "_zips" / f"{safe_name(name)}.zip",
-                     validate=fl.is_good_zip)
-        if dest.exists():
-            shutil.rmtree(dest, ignore_errors=True)
-        fl.safe_extract_zip(zp, dest)
-        _strip_media(dest)
-        (dest / "_ok").write_text(ref)
-        zp.unlink(missing_ok=True)
+        todo.append((name, slug, i.get("commit") or "HEAD", dest))
+    ctx.log(f"  RepoProbe: {len(chosen)} repos, {len(todo)} to fetch, {WORKERS} at a time")
+    failed = []
+    with fl.Progress("repos", total_items=len(todo), log=ctx.log) as pg:
+        def one(job):
+            name, slug, ref, dest = job
+            pg.start_item(name)
+            try:
+                zdest = d / "_zips" / f"{safe_name(name)}.zip"
+                try:
+                    zp = ctx.get(KEY, f"https://codeload.github.com/{slug}/zip/{ref}", zdest,
+                                 validate=fl.is_good_zip, progress=pg)
+                except fl.FetchError:
+                    if ref == "HEAD":
+                        raise
+                    ctx.log(f"  ! {name}: commit {ref[:10]} is gone upstream; using the current default branch")
+                    ref = "HEAD"
+                    zp = ctx.get(KEY, f"https://codeload.github.com/{slug}/zip/HEAD", zdest,
+                                 validate=fl.is_good_zip, progress=pg)
+                if dest.exists():
+                    shutil.rmtree(dest, ignore_errors=True)
+                fl.safe_extract_zip(zp, dest)
+                _strip_media(dest)
+                (dest / "_ok").write_text(ref)
+                zp.unlink(missing_ok=True)
+                pg.item_done()
+            except Exception as e:  # noqa: BLE001
+                pg.item_done(ok=False)
+                failed.append(f"{name}: {e}")
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            list(ex.map(one, todo))
+    if failed:
+        raise fl.FetchError(f"RepoProbe: {len(failed)} repos failed (rerun to resume):\n  " + "\n  ".join(failed))
     shutil.rmtree(d / "_zips", ignore_errors=True)
     z.unlink(missing_ok=True)
     (d / "_done").write_text(f"{len(chosen)} repos")

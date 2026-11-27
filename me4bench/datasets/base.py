@@ -62,7 +62,7 @@ class Ctx:
     def note(self, ds, what, url, est=None):
         self.plan.append((ds, what, url, est))
 
-    def get(self, ds: str, url: str, dest: Path, validate=None) -> Path:
+    def get(self, ds: str, url: str, dest: Path, validate=None, progress=None) -> Path:
         """Download with pin/lock checking. In dry-run, only records the plan."""
         rel = f"{ds}/" + dest.relative_to(self.root / ds).as_posix()
         if self.dry_run:
@@ -73,7 +73,7 @@ class Ctx:
             return dest
         if self.force and dest.exists():
             dest.unlink()
-        sha = fl.download(url, dest, expect_sha=self.pins.get(rel), validate=validate)
+        sha = fl.download(url, dest, expect_sha=self.pins.get(rel), validate=validate, progress=progress)
         if rel in self.lock and self.lock[rel] != sha and rel not in self.pins:
             self.log(f"  ! {rel}: upstream content changed since your last fetch "
                      f"(was {self.lock[rel][:10]}…, now {sha[:10]}…).")

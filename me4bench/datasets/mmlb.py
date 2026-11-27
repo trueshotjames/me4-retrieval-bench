@@ -10,6 +10,7 @@ import ast
 import json
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
 
@@ -21,6 +22,7 @@ REPO = "mayubo2333/MMLongBench-Doc"
 RAW = f"https://raw.githubusercontent.com/{REPO}/main/"
 MEDIA = f"https://media.githubusercontent.com/media/{REPO}/main/"   # serves Git-LFS content
 EMPTY_PAGE_CHARS = 20
+WORKERS = 6   # parallel PDF downloads
 
 
 def _evlist(v):
@@ -106,7 +108,7 @@ def fetch(ctx: Ctx) -> None:
     sj = d / "data" / "samples.json"
     if ctx.dry_run:
         ctx.get(KEY, RAW + "data/samples.json", sj)
-        ctx.note(KEY, "mmlb/documents/*.pdf (135 PDFs)", MEDIA + "documents/", 670_000_000)
+        ctx.note(KEY, "mmlb/documents/*.pdf (135 PDFs)", RAW + "data/documents/", 666_343_000)
         return
     ok = lambda p: not fl.looks_like_lfs_pointer(p) and fl.load_json(p) is not None  # noqa: E731
     try:
@@ -114,13 +116,25 @@ def fetch(ctx: Ctx) -> None:
     except fl.FetchError:
         ctx.get(KEY, MEDIA + "data/samples.json", sj, validate=ok)   # LFS pointer at main
     docs = sorted({s["doc_id"] for s in fl.load_json(sj)})
-    ctx.log(f"  MMLongBench-Doc: {len(docs)} PDFs")
-    for k, name in enumerate(docs, 1):
-        dest = d / "documents" / name
-        try:
-            ctx.get(KEY, MEDIA + "documents/" + quote(name), dest, validate=fl.is_pdf)
-        except fl.FetchError:
-            ctx.get(KEY, RAW + "documents/" + quote(name), dest, validate=fl.is_pdf)
-        if k % 20 == 0:
-            ctx.log(f"    {k}/{len(docs)} PDFs")
+    ctx.log(f"  MMLongBench-Doc: {len(docs)} PDFs, {WORKERS} at a time")
+    failed = []
+    with fl.Progress("PDFs", total_items=len(docs), log=ctx.log) as pg:
+        def one(name):
+            pg.start_item(name)
+            dest = d / "documents" / name
+            try:
+                # PDFs live in data/documents/ (plain git files); the LFS media host is a fallback
+                try:
+                    ctx.get(KEY, RAW + "data/documents/" + quote(name), dest, validate=fl.is_pdf, progress=pg)
+                except fl.FetchError:
+                    ctx.get(KEY, MEDIA + "data/documents/" + quote(name), dest, validate=fl.is_pdf, progress=pg)
+                pg.item_done()
+            except Exception as e:  # noqa: BLE001 - report all at the end, keep the others going
+                pg.item_done(ok=False)
+                failed.append(f"{name}: {e}")
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            list(ex.map(one, docs))
+    if failed:
+        raise fl.FetchError(f"MMLongBench-Doc: {len(failed)} PDFs failed (rerun to resume):\n  "
+                            + "\n  ".join(failed[:10]))
     (d / "_done").write_text(f"{len(docs)} pdfs")
