@@ -6,6 +6,8 @@ Five public datasets: FRAMES, MultiHop-RAG, MMLongBench-Doc, RepoProbe, MiMoTabl
 
 FRAMES articles: about 30% are stored as .docx, .html, .txt or .odt (the rest as .md) so your file readers get exercised. Which article gets which type is fixed by its title. Size effect is small (FRAMES is roughly 65 MB). Turn it off with `python tools/fetch_data.py --no-mixed-formats`. Wikipedia text is fetched live, so it can differ slightly from the version FRAMES was written against.
 
+FRAMES articles come from the Wikipedia Action API as wikitext, 50 articles per request, one request at a time, and are converted to Markdown locally (about 52 requests for all 2,551 articles). Templates are not expanded by Wikipedia, so infoboxes become key/value lists, common templates (dates, unit conversions, lists) are rendered, and citations and other templates are dropped. The revision id of each article is saved in `data/frames/_revisions.json`. Optional: set `ME4_CONTACT` to a URL that identifies you, such as the repo URL, to add it to the User-Agent (Wikimedia throttles anonymous clients harder).
+
 ## 1. Download (Windows, macOS, Linux, Raspberry Pi 4/5)
 Python 3.9+ only, no packages, no git.
 ```

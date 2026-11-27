@@ -62,6 +62,7 @@ class Progress:
         self.bytes = 0
         self.total_bytes = 0          # only used for ETA when there is a single item
         self.current = ""
+        self.note = ""                # free text shown at the end (e.g. retries)
         self.t0 = time.time()
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -100,7 +101,7 @@ class Progress:
         frac = min(1.0, frac)
         n = int(20 * frac)
         eta_s = f"~{int(eta // 60)}m{int(eta % 60):02d}s left" if eta is not None else "ETA ?"
-        extra = f" | {self.failed} failed" if self.failed else ""
+        extra = (f" | {self.failed} failed" if self.failed else "") + (f" | {self.note}" if self.note else "")
         size = f" | {human(self.bytes)}" if self.total_items > 1 else ""
         return (f"    {self.label} [{'#' * n}{'-' * (20 - n)}] {count} ({frac * 100:.0f}%){size} | "
                 f"{human(speed)}/s | {int(el // 60)}m{int(el % 60):02d}s elapsed, {eta_s}{extra}"
@@ -108,7 +109,10 @@ class Progress:
 
     def _draw(self, final=False):
         if self._tty:
-            sys.stderr.write("\r" + self.line().ljust(140)[:140] + ("\n" if final else ""))
+            # never wider than the console: a wrapped line cannot be redrawn with \r (Windows showed
+            # one new line per second)
+            w = max(40, shutil.get_terminal_size((100, 20)).columns - 1)
+            sys.stderr.write("\r" + self.line()[:w].ljust(w) + ("\n" if final else ""))
             sys.stderr.flush()
         elif final or time.time() - self._last_log >= 5:
             self.log(self.line())
