@@ -51,7 +51,9 @@ def _read_csvs(src: Path) -> list:
 
 
 def _repo_info(src: Path) -> dict:
-    """repo_name -> {language, commit, url}; tolerant of list/dict shapes."""
+    """repo_name -> {language, commit, url}; tolerant of list/dict shapes. Upstream (2026) is a list of
+    {"name": "owner/repo", "url", "primary_language", "snapshot": {"git": {"head": sha}}}, while the
+    CSVs use the short name, so each repo is keyed by both."""
     out = {}
     for p in sorted(src.rglob("repos_info*.json")):
         v = fl.load_json(p, None)
@@ -59,11 +61,19 @@ def _repo_info(src: Path) -> dict:
         for k, x in items:
             if not isinstance(x, dict):
                 continue
-            name = pick(x, ["repo_name", "name", "repo"], k if isinstance(k, str) else "")
-            if name:
-                out[str(name)] = {"language": str(pick(x, ["language", "lang", "main_language"], "")),
-                                  "commit": str(pick(x, ["commit", "commit_id", "commit_hash", "sha", "base_commit"], "")),
-                                  "url": str(pick(x, ["url", "repo_url", "github_url", "html_url"], ""))}
+            name = pick(x, ["repo_name", "name", "repo", "full_name"], k if isinstance(k, str) else "")
+            if not name:
+                continue
+            git = ((x.get("snapshot") or {}).get("git") or {}) if isinstance(x.get("snapshot"), dict) else {}
+            url = str(pick(x, ["url", "repo_url", "github_url", "html_url"], "") or git.get("origin", ""))
+            if not url and "/" in str(name):
+                url = "https://github.com/" + str(name)
+            rec = {"language": str(pick(x, ["language", "lang", "main_language", "primary_language"], "")),
+                   "commit": str(pick(x, ["commit", "commit_id", "commit_hash", "sha", "base_commit"], "")
+                                 or git.get("head", "")),
+                   "url": url}
+            out[str(name)] = rec
+            out.setdefault(str(name).rsplit("/", 1)[-1], rec)
     return out
 
 
@@ -101,7 +111,14 @@ def load(root: Path) -> list:
 
 
 def ready(root: Path) -> bool:
-    return (Path(root) / KEY / "_done").exists()
+    """_done plus every chosen repo extracted (an older run could finish with repos missing)."""
+    if not (Path(root) / KEY / "_done").exists():
+        return False
+    try:
+        _, _, chosen = _rows_and_repos(root)
+    except Exception:  # noqa: BLE001
+        return False
+    return len(chosen) > 1 and all((Path(root) / KEY / "repos" / safe_name(n) / "_ok").exists() for n in chosen)
 
 
 def _strip_media(d: Path) -> int:
@@ -155,8 +172,17 @@ def fetch(ctx: Ctx) -> None:
             name, slug, ref, dest = job
             pg.start_item(name)
             try:
-                zp = ctx.get(KEY, f"https://codeload.github.com/{slug}/zip/{ref}",
-                             d / "_zips" / f"{safe_name(name)}.zip", validate=fl.is_good_zip, progress=pg)
+                zdest = d / "_zips" / f"{safe_name(name)}.zip"
+                try:
+                    zp = ctx.get(KEY, f"https://codeload.github.com/{slug}/zip/{ref}", zdest,
+                                 validate=fl.is_good_zip, progress=pg)
+                except fl.FetchError:
+                    if ref == "HEAD":
+                        raise
+                    ctx.log(f"  ! {name}: commit {ref[:10]} is gone upstream; using the current default branch")
+                    ref = "HEAD"
+                    zp = ctx.get(KEY, f"https://codeload.github.com/{slug}/zip/HEAD", zdest,
+                                 validate=fl.is_good_zip, progress=pg)
                 if dest.exists():
                     shutil.rmtree(dest, ignore_errors=True)
                 fl.safe_extract_zip(zp, dest)

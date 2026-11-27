@@ -108,7 +108,7 @@ def fetch(ctx: Ctx) -> None:
     sj = d / "data" / "samples.json"
     if ctx.dry_run:
         ctx.get(KEY, RAW + "data/samples.json", sj)
-        ctx.note(KEY, "mmlb/documents/*.pdf (135 PDFs)", MEDIA + "documents/", 670_000_000)
+        ctx.note(KEY, "mmlb/documents/*.pdf (135 PDFs)", RAW + "data/documents/", 666_343_000)
         return
     ok = lambda p: not fl.looks_like_lfs_pointer(p) and fl.load_json(p) is not None  # noqa: E731
     try:
@@ -123,10 +123,11 @@ def fetch(ctx: Ctx) -> None:
             pg.start_item(name)
             dest = d / "documents" / name
             try:
+                # PDFs live in data/documents/ (plain git files); the LFS media host is a fallback
                 try:
-                    ctx.get(KEY, MEDIA + "documents/" + quote(name), dest, validate=fl.is_pdf, progress=pg)
+                    ctx.get(KEY, RAW + "data/documents/" + quote(name), dest, validate=fl.is_pdf, progress=pg)
                 except fl.FetchError:
-                    ctx.get(KEY, RAW + "documents/" + quote(name), dest, validate=fl.is_pdf, progress=pg)
+                    ctx.get(KEY, MEDIA + "data/documents/" + quote(name), dest, validate=fl.is_pdf, progress=pg)
                 pg.item_done()
             except Exception as e:  # noqa: BLE001 - report all at the end, keep the others going
                 pg.item_done(ok=False)
