@@ -12,11 +12,11 @@ FRAMES articles come from the Wikipedia Action API as wikitext, 50 articles per 
 Python 3.9+ only, no packages, no git.
 ```
 python tools/fetch_data.py --dry-run     # what will be downloaded, with sizes (about 1.5 GB)
-python tools/fetch_data.py               # resumable: re-run after any failure
-python -m me4bench build-manifest        # builds question lists, checks them against the fixed split
+python tools/fetch_data.py               # downloads everything, then builds and checks the question manifest
 ```
+One run does it all; it is resumable, so after a network failure just run it again (failed FRAMES articles are retried too). `python -m me4bench build-manifest` alone rebuilds the manifest without fetching.
 Always downloads all five. If GitHub rate-limits you, set `GITHUB_TOKEN`; for Hugging Face set `HF_TOKEN`. Behind a proxy, `HTTPS_PROXY` is honoured.
-**Unverified:** the loaders for MultiHop-RAG, MMLongBench-Doc, RepoProbe and MiMoTable were written without network access to the real files. `build-manifest` prints any stratum whose counts differ from the expected ones; send that output if it does.
+**Unverified:** the loaders for MultiHop-RAG, MMLongBench-Doc, RepoProbe and MiMoTable were written without network access to the real files. The manifest step prints any stratum whose counts differ from the expected ones; send that output if it does.
 
 ## 2. Connect your project
 Copy `adapters/agent_entry_template.py` to `adapters/agent_entry.py` and fill it in (`--project <folder>` or `ME4_PROJECT`). Project-side edits are minimal: see `docs/PROJECT_HOOKS.md`. Try the harness first with `--adapter adapters/fake_agent.py`.

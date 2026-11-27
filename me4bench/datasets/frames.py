@@ -279,8 +279,10 @@ def fetch(ctx: Ctx) -> None:
             fl.save_json(revs_path, revs)
     if fails:
         fl.save_json(d / "_failed.json", fails)
-        ctx.log(f"  ! {len(fails)} articles failed (see data/frames/_failed.json). Re-run fetch to retry.")
+        ctx.log(f"  ! {len(fails)} articles failed (see data/frames/_failed.json). The next fetch run retries them.")
         if len(fails) > 0.02 * len(urls):
             raise fl.FetchError("Too many Wikipedia failures; check the network and re-run (resumes).")
+    elif (d / "_failed.json").exists():
+        (d / "_failed.json").unlink()
     (d / "_done").write_text(time.strftime("fetched %Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     ctx.lock[f"{KEY}/_wikipedia_fetched_at"] = time.strftime("%Y-%m-%d", time.gmtime())

@@ -1,6 +1,7 @@
-"""Download all five datasets from their official sources. Standard library only.
+"""Download all five datasets from their official sources, then build and check the question
+manifest. Standard library only.
 
-  python tools/fetch_data.py              # fetch everything (resumable; re-run after any failure)
+  python tools/fetch_data.py              # fetch everything + build-manifest (resumable; re-run after any failure)
   python tools/fetch_data.py --dry-run    # list what would be downloaded (probes sizes)
   python tools/fetch_data.py --offline --dry-run   # list without touching the network
 """
@@ -31,6 +32,7 @@ def main(argv=None) -> int:
     ap.add_argument("--only", choices=sorted(MODS), nargs="+", help="debug: fetch only these (normal use: all five)")
     ap.add_argument("--no-mixed-formats", action="store_true",
                     help="FRAMES: store every article as .md (default: ~30%% become docx/html/txt/odt)")
+    ap.add_argument("--no-manifest", action="store_true", help="skip the build-manifest step at the end")
     ap.add_argument("--write-pins", action="store_true", help="write sha256 of fetched files to manifest/pins.json")
     a = ap.parse_args(argv)
 
@@ -52,7 +54,7 @@ def main(argv=None) -> int:
     failed = []
     for n in names:
         m = MODS[n]
-        if not a.dry_run and not a.force and m.ready(root):
+        if not a.dry_run and not a.force and m.ready(root) and not _retry_frames(n, root):
             print(f"[{n}] already downloaded")
             continue
         print(f"[{n}] {'planning' if a.dry_run else 'downloading'} ...", flush=True)
@@ -81,10 +83,28 @@ def main(argv=None) -> int:
         fl.save_json(REPO / "manifest" / "pins.json", ctx.lock)
         print("wrote manifest/pins.json")
     if failed:
-        print(f"\nFailed: {', '.join(failed)}")
+        print(f"\nFailed: {', '.join(failed)}. Re-run the same command; finished parts are kept.")
         return 1
-    print("\nOK. Next: python -m me4bench build-manifest" if not a.dry_run else "")
-    return 0
+    if a.dry_run or a.no_manifest:
+        return 0
+    if a.only:
+        print("\nOK (partial fetch with --only; build-manifest skipped).")
+        return 0
+    print("\nBuilding the question manifest ...", flush=True)
+    from .manifest import build
+    rc = build(root)
+    print("\nAll done. Next: python -m me4bench menu" if rc == 0 else "")
+    return rc
+
+
+def _retry_frames(name: str, root: Path) -> bool:
+    """FRAMES articles that failed last time are retried on every normal run (existing ones are kept)."""
+    if name != "frames":
+        return False
+    bad = fl.load_json(root / "frames" / "_failed.json", None)
+    if bad:
+        print(f"[frames] retrying {len(bad)} article(s) that failed last time")
+    return bool(bad)
 
 
 if __name__ == "__main__":
