@@ -12,7 +12,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .. import fetchlib as fl
@@ -125,7 +125,9 @@ def _fetch_article(url: str, dest: Path, gap: float, lock: threading.Lock, state
             err = f"HTTP {e.code}"
             if e.code == 404:
                 break
-            time.sleep(min(60, 3 * 2 ** attempt))
+            state["retries"] = state.get("retries", 0) + 1
+            ra = e.headers.get("Retry-After", "") if e.headers else ""
+            time.sleep(min(60, int(ra) if ra.isdigit() else 3 * 2 ** attempt))
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             err = str(e)
             time.sleep(min(30, 2 ** attempt))
@@ -146,12 +148,20 @@ def fetch(ctx: Ctx) -> None:
     ctx.log(f"  FRAMES: {len(urls)} articles, {len(missing)} to fetch (resumable; Ctrl+C is safe)")
     lock, state = threading.Lock(), {"next": time.time()}
     fails = []
-    with ThreadPoolExecutor(max_workers=max(1, ctx.jobs)) as ex:
-        for k, res in enumerate(ex.map(lambda t: _fetch_article(t[0], t[1], 0.15, lock, state), missing), 1):
+    t0, done = time.time(), 0
+    workers = max(ctx.jobs, 12)  # Wikipedia answers slowly per request; parallelism is what helps
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(_fetch_article, u, p, 0.05, lock, state) for u, p in missing]
+        for f in as_completed(futs):
+            done += 1
+            res = f.result()
             if res:
                 fails.append(res)
-            if k % 100 == 0:
-                ctx.log(f"    {k}/{len(missing)} articles")
+            if done % 25 == 0 or done == len(missing):
+                rate = done / max(1e-9, time.time() - t0)
+                eta = (len(missing) - done) / rate / 60 if rate else 0
+                ctx.log(f"    {done}/{len(missing)} articles, {rate*60:.0f}/min, ~{eta:.0f} min left, "
+                        f"{state.get('retries', 0)} retries, {len(fails)} failed")
     if fails:
         fl.save_json(d / "_failed.json", fails)
         ctx.log(f"  ! {len(fails)} articles failed (see data/frames/_failed.json). Re-run fetch to retry.")
