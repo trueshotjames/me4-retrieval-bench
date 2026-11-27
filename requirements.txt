@@ -1,0 +1,1 @@
+# standard library only. Optional: rich (nicer display), pypdf (one-time MMLB text-layer scan)

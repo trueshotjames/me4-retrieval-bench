@@ -1,0 +1,190 @@
+{
+ "note": "Expected stratum sizes; build-manifest verifies against these.",
+ "strata": {
+  "frames": {
+   "Multiple constraints, 4+ articles": {
+    "slots": 1,
+    "n": 69,
+    "test": 12
+   },
+   "Tabular, 2–3 articles": {
+    "slots": 1,
+    "n": 166,
+    "test": 12
+   },
+   "Numerical, 2–3 articles": {
+    "slots": 1,
+    "n": 142,
+    "test": 12
+   },
+   "Numerical, 4+ articles": {
+    "slots": 1,
+    "n": 55,
+    "test": 12
+   },
+   "Temporal (any article count)": {
+    "slots": 1,
+    "n": 106,
+    "test": 12
+   },
+   "Tabular, 4+ articles": {
+    "slots": 1,
+    "n": 70,
+    "test": 12
+   },
+   "Multiple constraints, 2–3 articles": {
+    "slots": 1,
+    "n": 196,
+    "test": 12
+   },
+   "Post-processing (any article count)": {
+    "slots": 1,
+    "n": 20,
+    "test": 10
+   }
+  },
+  "multihop": {
+   "Inference query": {
+    "slots": 2,
+    "n": 816,
+    "test": 24
+   },
+   "Comparison query": {
+    "slots": 3,
+    "n": 856,
+    "test": 36
+   },
+   "Null query (\"not in the files\")": {
+    "slots": 1,
+    "n": 301,
+    "test": 12
+   },
+   "Temporal query": {
+    "slots": 2,
+    "n": 583,
+    "test": 24
+   }
+  },
+  "mmlb": {
+   "Chart (one page)": {
+    "slots": 1,
+    "n": 67,
+    "test": 11
+   },
+   "Several pages (text layer)": {
+    "slots": 1,
+    "n": 269,
+    "test": 12
+   },
+   "Unanswerable, text document": {
+    "slots": 1,
+    "n": 144,
+    "test": 11
+   },
+   "(no slot) plain text": {
+    "slots": 0,
+    "n": 88,
+    "test": 0
+   },
+   "Evidence only on image-only pages": {
+    "slots": 1,
+    "n": 205,
+    "test": 13
+   },
+   "Figure or image (one page)": {
+    "slots": 1,
+    "n": 125,
+    "test": 13
+   },
+   "Layout text: footnotes, headers, lists": {
+    "slots": 1,
+    "n": 17,
+    "test": 6
+   },
+   "Table (one page)": {
+    "slots": 1,
+    "n": 88,
+    "test": 12
+   },
+   "Unanswerable, image-heavy document": {
+    "slots": 1,
+    "n": 79,
+    "test": 11
+   }
+  },
+  "repoprobe": {
+   "Implementation details": {
+    "slots": 2,
+    "n": 74,
+    "test": 24
+   },
+   "Error or log text in the question": {
+    "slots": 1,
+    "n": 20,
+    "test": 10
+   },
+   "Project architecture": {
+    "slots": 1,
+    "n": 30,
+    "test": 13
+   },
+   "Mentions README or docs": {
+    "slots": 1,
+    "n": 13,
+    "test": 6
+   },
+   "Names a source file": {
+    "slots": 1,
+    "n": 26,
+    "test": 12
+   },
+   "Business logic": {
+    "slots": 1,
+    "n": 14,
+    "test": 9
+   },
+   "Config question (yaml, json, toml)": {
+    "slots": 1,
+    "n": 32,
+    "test": 12
+   }
+  },
+  "mimotable": {
+   "One sheet, complicated header (merged cells)": {
+    "slots": 1,
+    "n": 135,
+    "test": 12
+   },
+   "One sheet, simple header": {
+    "slots": 2,
+    "n": 301,
+    "test": 24
+   },
+   "Several sheets, complicated header": {
+    "slots": 1,
+    "n": 63,
+    "test": 12
+   },
+   "Several tables on one sheet": {
+    "slots": 1,
+    "n": 58,
+    "test": 12
+   },
+   "Several sheets, simple header": {
+    "slots": 1,
+    "n": 25,
+    "test": 12
+   },
+   "Several files, complicated header": {
+    "slots": 1,
+    "n": 31,
+    "test": 11
+   },
+   "Several files, simple header": {
+    "slots": 1,
+    "n": 28,
+    "test": 11
+   }
+  }
+ }
+}
