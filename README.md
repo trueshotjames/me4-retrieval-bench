@@ -52,7 +52,7 @@ One run does everything, and it is resumable: after a network failure, run the s
 |---|---|
 | `--dry-run` | List downloads and sizes only. Add `--offline` to skip probing the network. |
 | `--force` | Download again even if present. |
-| `--no-mixed-formats` | Store every FRAMES article as `.md` (default: about 30% become .docx, .html, .txt or .odt). |
+| `--no-mixed-formats` | Store every FRAMES article as `.md` and every MiMoTable workbook as `.xlsx` (default: about 30% of FRAMES become .docx, .html, .txt or .odt, and about 30% of MiMoTable become .ods, .csv/.tsv or .xls). |
 | `--no-manifest` | Skip the manifest step at the end. |
 | `--only <ds> ...` | Debugging only. Fetches just those datasets and skips the manifest step. Normal use always fetches all five. |
 | `--root <dir>` | Where datasets go (default `./data`). |
@@ -65,6 +65,8 @@ One run does everything, and it is resumable: after a network failure, run the s
 | `HTTPS_PROXY` | Honoured for all downloads. |
 | `ME4_CONTACT` | Optional URL that identifies you (for example this repo's URL). Added to the Wikipedia User-Agent, since Wikimedia throttles anonymous clients harder. |
 | `ME4_FRAMES_MIXED_SHARE` | Share of FRAMES articles in non-Markdown formats, 0 to 1 (default 0.3). |
+| `ME4_MIMOTABLE_MIXED_SHARE` | Share of MiMoTable workbooks in non-.xlsx formats, 0 to 1 (default 0.3). |
+| `ME4_SOFFICE` | Path to LibreOffice `soffice`, if it is not on PATH or in the usual install folder. Only needed for the .xls share. |
 
 Nothing reads `.env` automatically. `.env.example` lists the variables; set them in your shell.
 
@@ -78,6 +80,8 @@ Nothing reads `.env` automatically. `.env.example` lists the variables; set them
 | MiMoTable | `jasonNLP/MiMoTable` on GitHub, English problems and spreadsheets |
 
 **How FRAMES articles are fetched:** 50 titles per request, one request at a time, about 52 requests for all 2,551 articles. Wikipedia returns wikitext, which is converted to Markdown locally. Templates are not expanded, so infoboxes become key/value lists, common templates (dates, unit conversions, lists) are rendered, and citations and other templates are dropped. Each article's revision id is saved in `data/frames/_revisions.json`. Which article gets which file type is fixed by its title, so every machine gets the same mix.
+
+**How MiMoTable file types are mixed:** after the download, 62 of the 206 workbooks (30%) are stored in another type, split about evenly: .ods (written in pure Python, any workbook), .csv or .tsv (only one-sheet files with a simple header, no merged cells, and no question that names a sheet), and .xls (only with LibreOffice installed, and only workbooks whose sheet names fit the 31-character .xls limit). Without LibreOffice the .xls share becomes .ods. Cell values, dates, merged cells and sheet names are kept; formulas, fonts and column widths are not. The choice is fixed by file name and content, the mapping is saved in `data/mimotable/english/_formats.json`, and each question's gold files follow it. Strata and the test split do not change. To change the mix, delete `data/mimotable` and fetch again.
 
 **The manifest step** loads each dataset's official question file, assigns the fixed train/test split, labels each question with its stratum, and writes `data/_manifest/<ds>.jsonl` (row format in `docs/SCHEMA.md`). It then compares every stratum's size and test count with `manifest/strata_expected.json`. If anything differs it prints each mismatch and records it in `data/_manifest/_status.json`, and **test runs are refused** until it matches. `python -m me4bench build-manifest` reruns this step alone.
 
@@ -267,7 +271,7 @@ Every answer is scored 0 to 1. "Not found" is detected by a fixed list of phrase
 | MultiHop-RAG | 2,556 | 96 | 609 news articles (6.8 MB, one JSON file) | .json | Judge accuracy; yes/no decided offline; null queries must say "not found" |
 | MMLongBench-Doc | 1,082 | 89 | 135 long PDFs (about 636 MB), many pages image-only | .pdf | Official rule scoring by answer format (Int, Float, Str, List, None) |
 | RepoProbe | 209 of 500 (15 repos, one per language) | 86 (6 whole repos) | 15 source repositories at pinned commits, media stripped | source code, configs, docs | Weighted checklist, judged item by item (0 to 1) |
-| MiMoTable (English) | 641 | 94 | 206 spreadsheets (1.7 MB) | .xlsx | LLM judge, correct or wrong; numbers accepted within 1% |
+| MiMoTable (English) | 641 | 94 | 206 spreadsheets (1.7 MB) | .xlsx, plus about 30% as .ods, .csv/.tsv, .xls | LLM judge, correct or wrong; numbers accepted within 1% |
 
 Test set: 459 questions in total (373 without RepoProbe). Everything else is training. A round has 40 slots, 8 per dataset, and each slot is a stratum below.
 
@@ -276,7 +280,7 @@ Test set: 459 questions in total (373 without RepoProbe). Everything else is tra
 - **MultiHop-RAG:** questions over a news corpus where the answer needs facts from 2 to 4 articles. Tests retrieval across similar articles (same story, different outlets and dates), comparison, time ordering, and refusing when the corpus has no answer. Strata: inference, comparison, temporal, null ("not in the files").
 - **MMLongBench-Doc:** questions about long PDFs (reports, papers, guidebooks, brochures). Tests PDF parsing, OCR or vision for pages with no text layer, reading tables, charts and figures, collecting evidence across many pages, and saying "not answerable" when the PDF has no answer. Strata: evidence only on image-only pages, several pages, table, chart, figure, layout text (footnotes, headers, lists), unanswerable (image-heavy / text document). Plain single-page text questions are training only.
 - **RepoProbe:** real GitHub Discussions questions about a code repository, with the maintainer's reply as reference. Tests code search over a whole repo: finding the right config key, source file, docs page or design reason, and explaining it the way a maintainer would. Strata: names a source file, config question, error or log text, mentions README or docs, project architecture, business logic, implementation details.
-- **MiMoTable:** questions about real-world spreadsheets with messy layouts. Tests reading .xlsx with merged and multi-row headers, several sheets, several tables on one sheet, and several files, then doing lookups, counts, sums, averages and comparisons correctly. Strata: one sheet (simple / complicated header), several sheets (simple / complicated), several tables on one sheet, several files (simple / complicated).
+- **MiMoTable:** questions about real-world spreadsheets with messy layouts. Tests reading spreadsheets (.xlsx, and .ods, .csv, .tsv or .xls for about 30% of files) with merged and multi-row headers, several sheets, several tables on one sheet, and several files, then doing lookups, counts, sums, averages and comparisons correctly. Strata: one sheet (simple / complicated header), several sheets (simple / complicated), several tables on one sheet, several files (simple / complicated).
 
 ## Sample questions
 All samples are real rows from the training split (none are test questions). "Processing" is what a good agent does; the harness only sees the spoken answer and its cited files.

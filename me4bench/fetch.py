@@ -31,13 +31,15 @@ def main(argv=None) -> int:
     ap.add_argument("--force", action="store_true", help="re-download even if present")
     ap.add_argument("--only", choices=sorted(MODS), nargs="+", help="debug: fetch only these (normal use: all five)")
     ap.add_argument("--no-mixed-formats", action="store_true",
-                    help="FRAMES: store every article as .md (default: ~30%% become docx/html/txt/odt)")
+                    help="store every FRAMES article as .md and every MiMoTable workbook as .xlsx "
+                         "(default: ~30%% of each become docx/html/txt/odt and ods/csv/tsv/xls)")
     ap.add_argument("--no-manifest", action="store_true", help="skip the build-manifest step at the end")
     ap.add_argument("--write-pins", action="store_true", help="write sha256 of fetched files to manifest/pins.json")
     a = ap.parse_args(argv)
 
     if a.no_mixed_formats:
         os.environ["ME4_FRAMES_MIXED_SHARE"] = "0"
+        os.environ["ME4_MIMOTABLE_MIXED_SHARE"] = "0"
     root = Path(a.root)
     pins = fl.load_json(REPO / "manifest" / "pins.json", {}) or {}
     lockp = root / "_fetch" / "lock.json"
