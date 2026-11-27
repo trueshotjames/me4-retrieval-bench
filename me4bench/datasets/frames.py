@@ -13,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from ..htmlmd import html_to_markdown
 from .base import Ctx, bucket_for, make_row, safe_name
 
 KEY = "frames"
+WIKI_UA = os.environ.get("ME4_WIKI_UA") or (fl.UA + " " + (os.environ.get("ME4_CONTACT") or ""))
 TSV_URL_PATH = "/datasets/google/frames-benchmark/resolve/main/test.tsv"
 WIKI_REST = "https://en.wikipedia.org/api/rest_v1/page/html/"
 EST_BYTES = 150_000_000  # Markdown output; the HTML download is several times larger
@@ -117,10 +119,10 @@ def _fetch_article2(url: str, dest: Path, gap: float, lock: threading.Lock, stat
     for attempt in range(5):
         with lock:  # global politeness gap between request starts
             wait = state["next"] - time.time()
-            state["next"] = max(state["next"], time.time()) + gap
+            state["next"] = max(state["next"], time.time()) + state.get("gap", gap)
         if wait > 0:
             time.sleep(wait)
-        req = urllib.request.Request(api, headers={"User-Agent": fl.UA, "Accept": "text/html"})
+        req = urllib.request.Request(api, headers={"User-Agent": WIKI_UA.strip(), "Accept": "text/html"})
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
                 html = r.read().decode("utf-8", "replace")
@@ -131,12 +133,20 @@ def _fetch_article2(url: str, dest: Path, gap: float, lock: threading.Lock, stat
             tmp.write_text(md, encoding="utf-8")
             tmp.replace(dest)
             state["bytes"] = state.get("bytes", 0) + len(html)
+            if state.get("gap", gap) > gap:   # recover slowly once requests succeed again
+                state["gap"] = max(gap, state["gap"] * 0.97)
             return None
         except urllib.error.HTTPError as e:
             err = f"HTTP {e.code}"
             if e.code == 404:
                 break
             state["retries"] = state.get("retries", 0) + 1
+            codes = state.setdefault("codes", {})
+            codes[e.code] = codes.get(e.code, 0) + 1
+            if e.code in (429, 503):   # throttled: slow EVERY worker down, not just this one
+                with lock:
+                    state["gap"] = min(5.0, max(state.get("gap", gap), 0.25) * 2)
+                    state["next"] = max(state["next"], time.time()) + 5
             ra = e.headers.get("Retry-After", "") if e.headers else ""
             time.sleep(min(60, int(ra) if ra.isdigit() else 3 * 2 ** attempt))
         except (urllib.error.URLError, OSError, TimeoutError) as e:
@@ -160,7 +170,7 @@ def fetch(ctx: Ctx) -> None:
     lock, state = threading.Lock(), {"next": time.time()}
     fails = []
     t0, done = time.time(), 0
-    workers = max(ctx.jobs, 12)  # Wikipedia answers slowly per request; parallelism is what helps
+    workers = max(ctx.jobs, 6)
     tty = sys.stderr.isatty()
     total = len(missing)
 
@@ -171,7 +181,8 @@ def fetch(ctx: Ctx) -> None:
         n = 20 * done // max(1, total)
         bar = "#" * n + "-" * (20 - n)
         return (f"    [{bar}] {done}/{total} ({100 * done // max(1, total)}%) | {rate * 60:.0f}/min | "
-                f"{state.get('active', 0)} in flight | {state.get('retries', 0)} retries | "
+                f"{state.get('active', 0)} in flight | {state.get('retries', 0)} retries "
+                f"{dict(state.get('codes', {})) or ''} | wait {state.get('gap', 0.2):.2f}s | "
                 f"{len(fails)} failed | {fl.human(state.get('bytes', 0))} | "
                 f"{int(el // 60)}m{int(el % 60):02d}s elapsed, ~{eta:.0f} min left | {state.get('last', '')[:30]}")
 
@@ -184,7 +195,7 @@ def fetch(ctx: Ctx) -> None:
             ctx.log(line)
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        pending = {ex.submit(_fetch_article, u, p, 0.05, lock, state) for u, p in missing}
+        pending = {ex.submit(_fetch_article, u, p, 0.2, lock, state) for u, p in missing}
         last_print = 0.0
         while pending:
             fin, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
