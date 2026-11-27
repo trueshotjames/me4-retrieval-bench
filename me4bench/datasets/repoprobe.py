@@ -11,6 +11,7 @@ import io
 import json
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .. import fetchlib as fl
@@ -25,6 +26,7 @@ KW = [("Names a source file", r"[\w\-/]+\.(py|ts|js|go|rs|cpp|cs|java|rb|lua|swi
       ("Config question (yaml, json, toml)", r"\b(yaml|yml|json|toml|config|\.env|dockerfile)\b"),
       ("Error or log text in the question", r"\b(error|traceback|exception|log)\b"),
       ("Mentions README or docs", r"\b(readme|docs?|documentation)\b")]
+WORKERS = 4   # parallel repo zip downloads
 TAX = {"Project Architecture": "Project architecture", "Business Logic": "Business logic"}
 
 
@@ -116,7 +118,11 @@ def _strip_media(d: Path) -> int:
 
 def fetch(ctx: Ctx) -> None:
     d = ctx.dir(KEY)
-    z = ctx.get(KEY, ZIP, d / "_src.zip", validate=fl.is_good_zip)
+    if ctx.dry_run:
+        z = ctx.get(KEY, ZIP, d / "_src.zip", validate=fl.is_good_zip)
+    else:
+        with fl.Progress("question files", log=ctx.log) as pg:
+            z = ctx.get(KEY, ZIP, d / "_src.zip", validate=fl.is_good_zip, progress=pg)
     if ctx.dry_run:
         ctx.note(KEY, "15 repo commit zips (one per language; sizes known after the question files)",
                  "https://codeload.github.com/<owner>/<repo>/zip/<commit>", 370 * 2 ** 20)
@@ -130,6 +136,7 @@ def fetch(ctx: Ctx) -> None:
         raise fl.FetchError("RepoProbe: found no question CSV in the upstream repo; layout changed. "
                             "Open an issue with the folder listing of Tencent-Hunyuan/RepoProbe.")
     repos = d / "repos"
+    todo = []
     for name in sorted(chosen):
         dest = repos / safe_name(name)
         if (dest / "_ok").exists() and not ctx.force:
@@ -140,15 +147,30 @@ def fetch(ctx: Ctx) -> None:
         if "/" not in slug:
             ctx.log(f"  ! {name}: no GitHub URL in repos_info.json, skipped (its questions will be unanswerable)")
             continue
-        ref = i.get("commit") or "HEAD"
-        zp = ctx.get(KEY, f"https://codeload.github.com/{slug}/zip/{ref}", d / "_zips" / f"{safe_name(name)}.zip",
-                     validate=fl.is_good_zip)
-        if dest.exists():
-            shutil.rmtree(dest, ignore_errors=True)
-        fl.safe_extract_zip(zp, dest)
-        _strip_media(dest)
-        (dest / "_ok").write_text(ref)
-        zp.unlink(missing_ok=True)
+        todo.append((name, slug, i.get("commit") or "HEAD", dest))
+    ctx.log(f"  RepoProbe: {len(chosen)} repos, {len(todo)} to fetch, {WORKERS} at a time")
+    failed = []
+    with fl.Progress("repos", total_items=len(todo), log=ctx.log) as pg:
+        def one(job):
+            name, slug, ref, dest = job
+            pg.start_item(name)
+            try:
+                zp = ctx.get(KEY, f"https://codeload.github.com/{slug}/zip/{ref}",
+                             d / "_zips" / f"{safe_name(name)}.zip", validate=fl.is_good_zip, progress=pg)
+                if dest.exists():
+                    shutil.rmtree(dest, ignore_errors=True)
+                fl.safe_extract_zip(zp, dest)
+                _strip_media(dest)
+                (dest / "_ok").write_text(ref)
+                zp.unlink(missing_ok=True)
+                pg.item_done()
+            except Exception as e:  # noqa: BLE001
+                pg.item_done(ok=False)
+                failed.append(f"{name}: {e}")
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            list(ex.map(one, todo))
+    if failed:
+        raise fl.FetchError(f"RepoProbe: {len(failed)} repos failed (rerun to resume):\n  " + "\n  ".join(failed))
     shutil.rmtree(d / "_zips", ignore_errors=True)
     z.unlink(missing_ok=True)
     (d / "_done").write_text(f"{len(chosen)} repos")

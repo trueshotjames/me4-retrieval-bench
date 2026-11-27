@@ -52,9 +52,11 @@ def ready(root: Path) -> bool:
 
 def fetch(ctx: Ctx) -> None:
     d = ctx.dir(KEY)
-    z = ctx.get(KEY, ZIP, d / "_src.zip", validate=fl.is_good_zip)
     if ctx.dry_run:
+        ctx.get(KEY, ZIP, d / "_src.zip", validate=fl.is_good_zip)
         return
+    with fl.Progress("archive", log=ctx.log) as pg:
+        z = ctx.get(KEY, ZIP, d / "_src.zip", validate=fl.is_good_zip, progress=pg)
     n = fl.safe_extract_zip(z, d, keep=lambda rel: rel.startswith("data/english/") or rel.upper().startswith("LICENSE"))
     # flatten data/english -> english
     src = d / "data" / "english"
