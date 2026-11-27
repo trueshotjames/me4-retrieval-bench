@@ -18,7 +18,7 @@ A harness that asks your ME4 voice agent questions from five public datasets, ti
 ## Contents
 - [Quick start](#quick-start)
 - [Setup and run guide](#setup-and-run-guide): download, connect your agent, build the index, record clips, check, run, read results
-- [How the benchmark works](#how-the-benchmark-works): split, rounds, question delivery, timing, scope, scoring, metrics, test-mode rules
+- [How the benchmark works](#how-the-benchmark-works): split, rounds, question delivery, timing, scope, scoring, metrics, debug layers, test-mode rules
 - [Datasets](#datasets) and [Sample questions](#sample-questions)
 - [Repository layout](#repository-layout), [Known limitations](#known-limitations), [Tests](#tests)
 
@@ -114,7 +114,7 @@ Events `ask` yields, in order:
 | `{"t":"speech","text":...}` | Optional spoken chunk; only used by the filler-rule fallback. | no |
 | `{"t":"answer_start"}` | The real answer begins. | fallback |
 | `{"t":"first_audio"}` | First synthesised audio chunk of the real answer (synthesised, not played). | **yes** |
-| `{"t":"answer","text":...,"citations":[...],"files_opened":[...],"tokens":{"in","out"}}` | Final answer. Ends the question. | |
+| `{"t":"answer","text":...,"citations":[...],"files_opened":[...],"retrieved":[...],"tokens":{"in","out"}}` | Final answer. Ends the question. `retrieved` is optional: your retriever's ranked list, best first, used only by the [debug layers](#debug-layers-retrieval-generation-end-to-end). | |
 
 The runner timestamps events as it receives them, so adapters never measure time themselves. Citations are a list like `[{"file": "report.pdf", "page": 3}]` (`sheet`, `slide`, `line` also accepted), or written at the end of the answer as `[report.pdf, page 3]`.
 
@@ -169,7 +169,7 @@ Press Ctrl+C once to stop after the current question; `resume` continues from th
 | `--rounds N\|round\|hour\|full` | `round` | 40 questions per round. `hour` = what fits in 60 minutes at `--sec-per-q` (3 rounds at 25 s). `full` = 6 rounds, the most a test run can draw without repeating a question. |
 | `--dataset <ds>` | all | Ask only this dataset (8 slots per round). |
 | `--exclude-repoprobe` | off | Skip code questions; their 8 slots go 2 each to the other four datasets. |
-| `--scope scoped\|given\|mixed` | `scoped` | Which documents the agent may search (see below). |
+| `--scope scoped\|given\|mixed\|decoy` | `scoped` | Which documents the agent may search (see below). |
 | `--judge none\|heuristic\|anthropic\|openai_compat` | `heuristic` | Scoring judge. Use `anthropic` or `openai_compat` for real scores. |
 | `--judge-model` | `claude-sonnet-5-5` (anthropic) | Judge model; also `ME4B_JUDGE_MODEL`. |
 | `--seed N` | random | Same seed and data give the same questions in the same order. The seed is saved in `config.json`. |
@@ -204,6 +204,12 @@ python -m me4bench report runs/<student>/<stamp>      # rebuild results.html onl
 ```
 Remote judge verdicts are cached in `runs/.judge_cache.jsonl`, so re-scoring the same answers costs nothing.
 
+Tag each question by the layer that failed (see [Debug layers](#debug-layers-retrieval-generation-end-to-end)), using a normal run and a `--scope given` run of the same questions (same `--seed`, mode and rounds):
+```
+python -m me4bench layers runs/<student>/<scoped_stamp> --oracle runs/<student>/<given_stamp>
+```
+This writes `layers.json` and `layers.html` into the scoped run folder. Without `--oracle` it still writes layers 1 and 3.
+
 ## How the benchmark works
 
 ### The fixed split
@@ -234,6 +240,7 @@ The agent hears what a user would say and nothing more. Each question is sent as
 | `scoped` (default) | the question's dataset | empty | The agent searches that dataset's whole corpus. |
 | `given` | the question's dataset | the gold documents | Isolates reading from retrieval: the agent is told which files to use. |
 | `mixed` | `all` | empty | One index over all five corpora; hardest. |
+| `decoy` | the question's dataset | another question's gold documents (no file shared) | Refusal check: the answer is not in those files, so the only correct reply is "not found". |
 
 ### Scoring
 Every answer is scored 0 to 1. "Not found" is detected by a fixed list of phrases ("not in the files", "cannot be determined", "no information", "not answerable", and similar). For a question with no answer in the files, saying not found is the only correct reply; for an answerable question, saying not found is wrong.
@@ -256,6 +263,17 @@ Every answer is scored 0 to 1. "Not found" is detected by a fixed list of phrase
 - **Raw accuracy:** the plain mean, with a worst-case 95% margin (1.96·√(0.25/n)).
 - **Behaviour:** correct "not found" rate on unanswerable questions, confident-wrong rate (wrong and did not say not found), false "not found" rate (said not found when the answer exists), clarification rate.
 - **Accuracy by files needed**, median files opened, citation check counts, p50/p95 latency and timing sources, failures, max CPU temperature and RAM during the run.
+
+### Debug layers: retrieval, generation, end to end
+These metrics help you find *where* an answer went wrong. They are reported next to the official scores in `results.html` ("Debug layers") and in `results.json` under `summary.layers`, and they never change the official scores.
+
+| Layer | Question it answers | Metrics | How it is measured |
+|---|---|---|---|
+| 1. Retrieval | Did the agent find the gold evidence? | Recall@5, Recall@10, nDCG@10, MRR, pass rate | From `retrieved` in the answer event; if absent, `files_opened`, then `citations` (the source used is shown). Per page for MMLongBench-Doc, per file elsewhere. Pass = every gold item (up to 10) in the top 10. RepoProbe has no per-file gold, so no layer 1. |
+| 2. Generation | Is the answer right when the evidence is handed over? | Oracle accuracy; refusal rate | Oracle accuracy is the accuracy of a `--scope given` run. Refusal rate is the share of "not found" replies in a `--scope decoy` run. |
+| 3. End to end | Is the normal answer right and honest? | Accuracy, acceptable, missing and hallucination rates, truthfulness, evidence sufficiency | Each answer is correct, acceptable (score ≥ 0.5 but not correct), missing (not found to an answerable question, or no answer) or wrong. Truthfulness = mean of +1 / +0.5 / 0 / −1. Evidence sufficiency = share of gold items covered by the citations. |
+
+`python -m me4bench layers` joins a scoped run and a given run into one tag per question: **retrieval miss** (layer 1 failed), **generation miss** (layer 1 passed, layer 2 failed), **integration miss** (layers 1 and 2 passed, end to end failed) or **pass**. A question with no retrieval list that also fails with the documents handed over counts as a generation miss; anything else that cannot be decided is "unknown". Report `retrieved` from your adapter to get the sharpest layer 1.
 
 ### Test-mode rules
 - Test runs are refused if the manifest check failed (`ME4_ALLOW_UNVERIFIED=1` overrides, for practice only).
@@ -385,9 +403,11 @@ All samples are real rows from the training split (none are test questions). "Pr
 | `me4bench/runner.py`, `me4bench/voice.py` | Run loop, question delivery, timing. |
 | `me4bench/speech.py` | Speech normalisation of questions and the fixed clarification reply. |
 | `me4bench/scoring/` | Per-dataset scorers, the judge and its prompts, aggregation. |
-| `me4bench/report.py` | Writes `results.html`. |
+| `me4bench/layers.py` | Debug layers: retrieval, generation and end-to-end metrics, and the per-question tags. |
+| `me4bench/report.py` | Writes `results.html` and `layers.html`. |
 | `me4bench/marks.py` | Timing marks to copy into your project. |
 | `me4bench/wikitext.py`, `me4bench/convert.py`, `me4bench/htmlmd.py` | Wikitext to Markdown, and Markdown to docx/html/txt/odt. |
+| `me4bench/sheetconv.py` | MiMoTable workbooks from .xlsx to .ods, .csv/.tsv, and .xls (via LibreOffice). |
 | `docs/SCHEMA.md`, `docs/PROJECT_HOOKS.md` | The data and adapter contracts, and the edits your project needs. |
 
 Created by the run, all git-ignored: `data/` (datasets, `_manifest/`, `_corpus/`), `index/`, `audio/`, `runs/`.

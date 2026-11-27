@@ -290,6 +290,8 @@ def ask_one(adapter, row: dict, scope: dict, clips: Optional[ClipStore] = None,
         res["answer"] = str(answer_ev.get("text") or "")
         res["citations"] = answer_ev.get("citations")
         res["files_opened"] = answer_ev.get("files_opened")
+        if answer_ev.get("retrieved") is not None:      # optional ranked list, for layer-1 metrics
+            res["retrieved"] = answer_ev.get("retrieved")
         res["tokens"] = answer_ev.get("tokens")
     res["t_answer_start_s"] = rel(t_answer_start)
     if t_answer is not None:

@@ -48,7 +48,7 @@ def ask(utt, scope):
         text = r.get("gold", "")
     docs = r.get("gold_docs") or []
     yield {"t": "answer", "text": text, "citations": [{"file": d} for d in docs[:1]],
-           "files_opened": docs, "tokens": {"in": 10, "out": 5}}
+           "files_opened": docs, "retrieved": ["unrelated.txt"] + list(docs), "tokens": {"in": 10, "out": 5}}
 
 
 def shutdown():

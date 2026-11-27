@@ -38,7 +38,8 @@ def ask(utt, scope):
     yield {"t":"clarify","text":...}         # optional; reply arrives via `reply = yield ...`
     yield {"t":"answer_start"}               # real answer begins
     yield {"t":"first_audio"}                # first synthesised audio chunk (not played)
-    yield {"t":"answer","text":...,"citations":[],"files_opened":[],"tokens":{"in":0,"out":0}}
+    yield {"t":"answer","text":...,"citations":[],"files_opened":[],"tokens":{"in":0,"out":0},
+           "retrieved":[]}                  # optional: ranked retriever hits, best first (layer-1 metrics)
     """
     raise NotImplementedError
     yield  # pragma: no cover

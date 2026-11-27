@@ -28,7 +28,7 @@ Functions: `describe()`, `ingest(folder, namespace)` (remote only), `attach(inde
 - `{"t":"tool","name":...,"phase":"start|end","args":{}}` optional.
 - `{"t":"answer_start"}` real answer begins (the `mark("answer_start")` of the plan).
 - `{"t":"first_audio"}` first synthesised audio chunk of the real answer (stops the clock; not played).
-- `{"t":"answer","text":..., "citations":[{"file":..,"page":..,"sheet":..,"slide":..,"line":..}], "files_opened":[..], "tokens":{"in":..,"out":..}}` final. Ends the question.
+- `{"t":"answer","text":..., "citations":[{"file":..,"page":..,"sheet":..,"slide":..,"line":..}], "files_opened":[..], "retrieved":[..], "tokens":{"in":..,"out":..}}` final. Ends the question. `retrieved` is optional: the ranked list your retriever returned, best first, as file names or `{"file":..,"page":..}`. It feeds the layer-1 debug metrics (Recall@k, nDCG@10, MRR); without it, `files_opened` and then `citations` stand in.
 The runner timestamps events on receipt (`time.monotonic()`), so adapters only yield.
 
 ## Run folder `runs/<student>/<YYYYmmdd-HHMMSS>/`

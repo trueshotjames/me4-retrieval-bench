@@ -1,4 +1,4 @@
-"""python -m me4bench <fetch|build-manifest|menu|run|score|report|check|index|resume>"""
+"""python -m me4bench <fetch|build-manifest|menu|run|score|report|layers|check|index|resume>"""
 from __future__ import annotations
 
 import argparse
@@ -70,7 +70,7 @@ def _go(a, mode, n_rounds, datasets, exclude):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="me4bench")
-    ap.add_argument("cmd", choices=["fetch", "build-manifest", "menu", "run", "score", "report", "check", "index", "resume"])
+    ap.add_argument("cmd", choices=["fetch", "build-manifest", "menu", "run", "score", "report", "layers", "check", "index", "resume"])
     ap.add_argument("rest", nargs="*")
     ap.add_argument("--root", default="data")
     ap.add_argument("--runs", default="runs")
@@ -83,7 +83,9 @@ def main(argv=None) -> int:
     ap.add_argument("--rounds", default="round", help="number, or round|hour|full")
     ap.add_argument("--dataset", choices=ALL, help="benchmark only this dataset (all are still downloaded)")
     ap.add_argument("--exclude-repoprobe", action="store_true", help="skip code questions; their slots go to the other four")
-    ap.add_argument("--scope", choices=["scoped", "given", "mixed"], default="scoped")
+    ap.add_argument("--scope", choices=["scoped", "given", "mixed", "decoy"], default="scoped",
+                    help="given = oracle documents (layer 2); decoy = wrong documents, expects 'not found'")
+    ap.add_argument("--oracle", help="layers: a --scope given run folder, for the per-question tags")
     ap.add_argument("--judge", choices=["none", "heuristic", "anthropic", "openai_compat"], default="heuristic")
     ap.add_argument("--judge-model")
     ap.add_argument("--seed", type=int)
@@ -133,16 +135,37 @@ def main(argv=None) -> int:
         j = scoring.Judge(a.judge, model=a.judge_model, cache_path=str(Path(a.runs) / ".judge_cache.jsonl"))
         rows = _rows(a.root)
         byid = {r["id"]: r for r in rows}
+        from . import layers
+        scope = data["config"].get("scope", "scoped")
+        ctx = {"stratum_sizes": runner.stratum_sizes(rows), "scope": scope}
         new = []
         for rec in data["rows"]:
             q = byid[rec["id"]]
-            sc = scoring.score_question(q, rec, j, {"stratum_sizes": runner.stratum_sizes(rows)})
-            new.append({**rec, **sc})
+            sc = scoring.score_question(q, rec, j, ctx)
+            nr = {**rec, **sc}
+            nr["layers"] = layers.per_question(q, nr)
+            new.append(nr)
         data["rows"] = new
-        data["summary"] = scoring.aggregate(new, {"stratum_sizes": runner.stratum_sizes(rows)})
+        machine = data["summary"].get("machine")
+        data["summary"] = scoring.aggregate(new, ctx)
+        data["summary"]["layers"] = layers.aggregate(new, scope)
+        if machine:
+            data["summary"]["machine"] = machine
         (d / "results.json").write_text(json.dumps(data, indent=1, default=str))
         from . import report
         print(report.write(d))
+        return 0
+    if a.cmd == "layers":
+        from . import layers, report
+        d = Path(a.rest[0])
+        e2e = json.loads((d / "results.json").read_text())["rows"]
+        orc = json.loads((Path(a.oracle) / "results.json").read_text())["rows"] if a.oracle else None
+        tags = layers.tag_runs(e2e, orc)
+        out = {"e2e_run": str(d), "oracle_run": a.oracle, "summary": layers.tag_summary(tags), "questions": tags}
+        (d / "layers.json").write_text(json.dumps(out, indent=1))
+        print(report.write_layers(d, out))
+        for ds, c in out["summary"].items():
+            print(f"  {ds:10} " + ", ".join(f"{k} {v}" for k, v in c.items()))
         return 0
     if a.cmd == "index":
         if runner.is_pi():
