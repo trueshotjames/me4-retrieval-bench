@@ -4,6 +4,8 @@
 
 Five public datasets: FRAMES, MultiHop-RAG, MMLongBench-Doc, RepoProbe, MiMoTable (English). Nothing is committed; they are downloaded from the official sources.
 
+FRAMES articles: about 30% are stored as .docx, .html, .txt or .odt (the rest as .md) so your file readers get exercised. Which article gets which type is fixed by its title. Size effect is small (FRAMES is roughly 65 MB). Turn it off with `python tools/fetch_data.py --no-mixed-formats`. Wikipedia text is fetched live, so it can differ slightly from the version FRAMES was written against.
+
 ## 1. Download (Windows, macOS, Linux, Raspberry Pi 4/5)
 Python 3.9+ only, no packages, no git.
 ```

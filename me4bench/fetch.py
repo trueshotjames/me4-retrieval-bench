@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import sys
 import time
@@ -28,9 +29,13 @@ def main(argv=None) -> int:
     ap.add_argument("--offline", action="store_true", help="with --dry-run: do not probe the network")
     ap.add_argument("--force", action="store_true", help="re-download even if present")
     ap.add_argument("--only", choices=sorted(MODS), nargs="+", help="debug: fetch only these (normal use: all five)")
+    ap.add_argument("--no-mixed-formats", action="store_true",
+                    help="FRAMES: store every article as .md (default: ~30%% become docx/html/txt/odt)")
     ap.add_argument("--write-pins", action="store_true", help="write sha256 of fetched files to manifest/pins.json")
     a = ap.parse_args(argv)
 
+    if a.no_mixed_formats:
+        os.environ["ME4_FRAMES_MIXED_SHARE"] = "0"
     root = Path(a.root)
     pins = fl.load_json(REPO / "manifest" / "pins.json", {}) or {}
     lockp = root / "_fetch" / "lock.json"

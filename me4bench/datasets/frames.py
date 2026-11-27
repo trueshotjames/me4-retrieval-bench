@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from .. import fetchlib as fl
+from .. import convert
 from ..htmlmd import html_to_markdown
 from .base import Ctx, bucket_for, make_row, safe_name
 
@@ -52,8 +53,19 @@ def title_of(url: str) -> str:
     return t.replace("_", " ")
 
 
+def mixed_share() -> float:
+    """Share of articles stored as docx/html/txt/odt instead of .md. 0 turns it off.
+    Set ME4_FRAMES_MIXED_SHARE=0 or run fetch with --no-mixed-formats."""
+    try:
+        return max(0.0, min(1.0, float(os.environ.get("ME4_FRAMES_MIXED_SHARE", convert.DEFAULT_SHARE))))
+    except ValueError:
+        return convert.DEFAULT_SHARE
+
+
 def article_file(url: str) -> str:
-    return "articles/" + safe_name(title_of(url)) + ".md"
+    t = title_of(url)
+    fmt = convert.choose_format(t, mixed_share())
+    return "articles/" + safe_name(t) + "." + fmt
 
 
 def _links(r: dict) -> list:
@@ -130,7 +142,11 @@ def _fetch_article2(url: str, dest: Path, gap: float, lock: threading.Lock, stat
             md = f"# {title_of(url)}\n\nSource: {url}\nRevision: {rev}\n\n" + html_to_markdown(html)
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.with_name(dest.name + ".part")
-            tmp.write_text(md, encoding="utf-8")
+            ext = dest.suffix.lstrip(".")
+            if ext == "md":
+                tmp.write_text(md, encoding="utf-8")
+            else:
+                tmp.write_bytes(convert.convert(md, ext, title_of(url)))
             tmp.replace(dest)
             state["bytes"] = state.get("bytes", 0) + len(html)
             if state.get("gap", gap) > gap:   # recover slowly once requests succeed again
