@@ -12,7 +12,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+import sys
 from pathlib import Path
 
 from .. import fetchlib as fl
@@ -95,6 +96,15 @@ def _fetch_article(url: str, dest: Path, gap: float, lock: threading.Lock, state
     if dest.exists() and dest.stat().st_size > 0:
         return None
     title = title_of(url)
+    state["active"] = state.get("active", 0) + 1
+    state["last"] = title
+    try:
+        return _fetch_article2(url, dest, gap, lock, state, title)
+    finally:
+        state["active"] -= 1
+
+
+def _fetch_article2(url: str, dest: Path, gap: float, lock: threading.Lock, state: dict, title: str):
     if "w.wiki" in url:  # short link: follow the redirect to learn the real title
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": fl.UA}), timeout=30) as r:
@@ -120,6 +130,7 @@ def _fetch_article(url: str, dest: Path, gap: float, lock: threading.Lock, state
             tmp = dest.with_name(dest.name + ".part")
             tmp.write_text(md, encoding="utf-8")
             tmp.replace(dest)
+            state["bytes"] = state.get("bytes", 0) + len(html)
             return None
         except urllib.error.HTTPError as e:
             err = f"HTTP {e.code}"
@@ -150,18 +161,43 @@ def fetch(ctx: Ctx) -> None:
     fails = []
     t0, done = time.time(), 0
     workers = max(ctx.jobs, 12)  # Wikipedia answers slowly per request; parallelism is what helps
+    tty = sys.stderr.isatty()
+    total = len(missing)
+
+    def status() -> str:
+        el = max(1e-9, time.time() - t0)
+        rate = done / el
+        eta = (total - done) / rate / 60 if rate else 0
+        n = 20 * done // max(1, total)
+        bar = "#" * n + "-" * (20 - n)
+        return (f"    [{bar}] {done}/{total} ({100 * done // max(1, total)}%) | {rate * 60:.0f}/min | "
+                f"{state.get('active', 0)} in flight | {state.get('retries', 0)} retries | "
+                f"{len(fails)} failed | {fl.human(state.get('bytes', 0))} | "
+                f"{int(el // 60)}m{int(el % 60):02d}s elapsed, ~{eta:.0f} min left | {state.get('last', '')[:30]}")
+
+    def show(final=False):
+        line = status()
+        if tty:
+            sys.stderr.write("\r" + line.ljust(170)[:170] + ("\n" if final else ""))
+            sys.stderr.flush()
+        else:
+            ctx.log(line)
+
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = [ex.submit(_fetch_article, u, p, 0.05, lock, state) for u, p in missing]
-        for f in as_completed(futs):
-            done += 1
-            res = f.result()
-            if res:
-                fails.append(res)
-            if done % 25 == 0 or done == len(missing):
-                rate = done / max(1e-9, time.time() - t0)
-                eta = (len(missing) - done) / rate / 60 if rate else 0
-                ctx.log(f"    {done}/{len(missing)} articles, {rate*60:.0f}/min, ~{eta:.0f} min left, "
-                        f"{state.get('retries', 0)} retries, {len(fails)} failed")
+        pending = {ex.submit(_fetch_article, u, p, 0.05, lock, state) for u, p in missing}
+        last_print = 0.0
+        while pending:
+            fin, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+            for f in fin:
+                done += 1
+                res = f.result()
+                if res:
+                    fails.append(res)
+            if tty or time.time() - last_print >= 5:   # every second on a terminal, every 5 s in a log
+                show()
+                last_print = time.time()
+        if total:
+            show(final=True)
     if fails:
         fl.save_json(d / "_failed.json", fails)
         ctx.log(f"  ! {len(fails)} articles failed (see data/frames/_failed.json). Re-run fetch to retry.")
